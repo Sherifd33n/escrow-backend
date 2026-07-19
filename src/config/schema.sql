@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS `users` (
 `phone_verified_at` TIMESTAMP NULL DEFAULT NULL,
 `kyc_tier` INT NOT NULL DEFAULT 1,
 `is_verified` TINYINT(1) NOT NULL DEFAULT 0,
+`is_active` TINYINT(1) NOT NULL DEFAULT 1,
 `email_verified_at` TIMESTAMP NULL DEFAULT NULL,
   `two_factor_enabled` TINYINT(1) NOT NULL DEFAULT 0,
   `notif_email` TINYINT(1) NOT NULL DEFAULT 1,

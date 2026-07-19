@@ -42,6 +42,18 @@ export async function initDatabase() {
       queueLimit: 0,
     });
 
+    const [db] = await pool.query("SELECT DATABASE() AS db");
+    console.log("Connected database:", db[0].db);
+
+    const [tables] = await pool.query("SHOW TABLES");
+    console.log("Tables:", tables);
+
+    const [columns] = await pool.query("SHOW COLUMNS FROM users");
+    console.log(
+      "Users columns:",
+      columns.map((c) => c.Field),
+    );
+
     // Run schema.sql to create tables if they don't exist
     const schemaPath = path.join(__dirname, "schema.sql");
     if (fs.existsSync(schemaPath)) {
@@ -145,6 +157,10 @@ async function runMigrations(conn) {
     {
       name: "marketing_comms",
       definition: "TINYINT(1) NOT NULL DEFAULT 0",
+    },
+    {
+      name: "is_active",
+      definition: "TINYINT(1) NOT NULL DEFAULT 1",
     },
   ];
 
