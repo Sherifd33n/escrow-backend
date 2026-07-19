@@ -5,6 +5,8 @@ import crypto from "crypto";
 import { ACTION_STATUS_MAP } from "../core/transactionActionMap.js";
 import { updateTransactionStatus } from "../services/transactionService.js";
 import { logTransactionEvent } from "../services/transactionEventService.js";
+import { notify } from "../services/notificationService.js";
+import { NOTIFICATION_TYPE } from "../constants/notificationTypes.js";
 
 const router = express.Router();
 
@@ -12,7 +14,11 @@ import { TRANSACTION_STATUS } from "../core/transactionStatus.js";
 
 import { canTransition } from "../core/transactionStateMachine.js";
 
-import { fundEscrow, releaseEscrow, refundEscrow } from "../services/walletService.js";
+import {
+  fundEscrow,
+  releaseEscrow,
+  refundEscrow,
+} from "../services/walletService.js";
 
 // Apply auth middleware to all routes in this router
 router.use(authMiddleware);
@@ -35,59 +41,74 @@ const ROLE = {
   SELLER: "seller",
 };
 
+// Dispute lifecycle statuses — used everywhere instead of inline strings.
+const DISPUTE_STATUS = Object.freeze({
+  FILED: "filed",
+  UNDER_REVIEW: "under_review",
+  RESOLVED: "resolved",
+});
+
 // Valid transaction statuses and the transitions permitted between them.
 // Anything not listed as a valid "from -> to" pair is rejected.
 const ALLOWED_TRANSACTION_STATUSES = Object.values(TRANSACTION_STATUS);
 
 // ---------------------------------------------------------------------
+// Role-permission map aligned with transactionStateMachine.js.
+// Only transitions that non-admin users may perform through PATCH /:id/status
+// are listed here.  Admin-only paths (DISPUTED→APPROVED, DISPUTED→COMPLETED)
+// are handled exclusively by PATCH /:id/dispute/resolve.
+// PENDING→FUNDED is driven by POST /milestones/:id/pay, not by the status
+// endpoint, so it has no entry here.
 const TRANSACTION_TRANSITION_ROLES = {
-  [`${TRANSACTION_STATUS.PENDING}:${TRANSACTION_STATUS.ACTIVE}`]: [
+  // Once funded the seller starts work
+  [`${TRANSACTION_STATUS.FUNDED}:${TRANSACTION_STATUS.INPROGRESS}`]: [
+    ROLE.SELLER,
+  ],
+  [`${TRANSACTION_STATUS.FUNDED}:${TRANSACTION_STATUS.DISPUTED}`]: [
     ROLE.BUYER,
     ROLE.SELLER,
   ],
-  [`${TRANSACTION_STATUS.PENDING}:${TRANSACTION_STATUS.CANCELLED}`]: [
-    ROLE.BUYER,
-    ROLE.SELLER,
-  ],
-  [`${TRANSACTION_STATUS.ACTIVE}:${TRANSACTION_STATUS.INPROGRESS}`]: [
-    ROLE.SELLER,
-  ],
-  [`${TRANSACTION_STATUS.ACTIVE}:${TRANSACTION_STATUS.DISPUTED}`]: [
-    ROLE.BUYER,
-    ROLE.SELLER,
-  ],
-  [`${TRANSACTION_STATUS.ACTIVE}:${TRANSACTION_STATUS.CANCELLED}`]: [
-    ROLE.BUYER,
-    ROLE.SELLER,
-  ],
-  [`${TRANSACTION_STATUS.INPROGRESS}:${TRANSACTION_STATUS.REVIEW}`]: [
+
+  // Work in progress
+  [`${TRANSACTION_STATUS.INPROGRESS}:${TRANSACTION_STATUS.INSPECTION}`]: [
     ROLE.SELLER,
   ],
   [`${TRANSACTION_STATUS.INPROGRESS}:${TRANSACTION_STATUS.DISPUTED}`]: [
     ROLE.BUYER,
     ROLE.SELLER,
   ],
-  [`${TRANSACTION_STATUS.INPROGRESS}:${TRANSACTION_STATUS.CANCELLED}`]: [
+
+  // Buyer reviews the deliverable
+  [`${TRANSACTION_STATUS.INSPECTION}:${TRANSACTION_STATUS.AUDIT}`]: [
+    ROLE.BUYER,
+  ],
+  [`${TRANSACTION_STATUS.INSPECTION}:${TRANSACTION_STATUS.REVISION}`]: [
+    ROLE.BUYER,
+  ],
+  [`${TRANSACTION_STATUS.INSPECTION}:${TRANSACTION_STATUS.DISPUTED}`]: [
     ROLE.BUYER,
     ROLE.SELLER,
   ],
-  [`${TRANSACTION_STATUS.REVIEW}:${TRANSACTION_STATUS.COMPLETED}`]: [
-    ROLE.BUYER,
+
+  // Revision loop
+  [`${TRANSACTION_STATUS.REVISION}:${TRANSACTION_STATUS.INPROGRESS}`]: [
+    ROLE.SELLER,
   ],
-  [`${TRANSACTION_STATUS.REVIEW}:${TRANSACTION_STATUS.DISPUTED}`]: [
+  [`${TRANSACTION_STATUS.REVISION}:${TRANSACTION_STATUS.DISPUTED}`]: [
     ROLE.BUYER,
     ROLE.SELLER,
   ],
-  [`${TRANSACTION_STATUS.REVIEW}:${TRANSACTION_STATUS.CANCELLED}`]: [
+
+  // Audit / approval
+  [`${TRANSACTION_STATUS.AUDIT}:${TRANSACTION_STATUS.APPROVED}`]: [ROLE.BUYER],
+  [`${TRANSACTION_STATUS.AUDIT}:${TRANSACTION_STATUS.DISPUTED}`]: [
     ROLE.BUYER,
     ROLE.SELLER,
   ],
-  [`${TRANSACTION_STATUS.DISPUTED}:${TRANSACTION_STATUS.COMPLETED}`]: [
+
+  // Buyer releases funds
+  [`${TRANSACTION_STATUS.APPROVED}:${TRANSACTION_STATUS.COMPLETED}`]: [
     ROLE.BUYER,
-  ],
-  [`${TRANSACTION_STATUS.DISPUTED}:${TRANSACTION_STATUS.CANCELLED}`]: [
-    ROLE.BUYER,
-    ROLE.SELLER,
   ],
 };
 
@@ -110,15 +131,19 @@ const ALLOWED_MILESTONE_TRANSITIONS = {
 
 const MAX_DELIVERABLE_NOTE_LENGTH = 5000;
 
-// Issue 7: cap title length (transaction titles and milestone titles both
+// Cap title length (transaction titles and milestone titles both
 // use this field name/shape, so both are guarded by the same constant).
 const MAX_TITLE_LENGTH = 200;
 
-// Issue 10: reject absurd transaction amounts. Placeholder ceiling -
-// adjust to whatever your actual business maximum is.
+// Reject absurd transaction amounts.
 const MAX_TRANSACTION_AMOUNT = 1_000_000;
 
 const CATEGORY_PATTERN = /^[a-zA-Z0-9 _-]{2,50}$/;
+
+// Centralised validation limits for dispute and review fields.
+const MAX_DISPUTE_REASON_LENGTH = 2000;
+const MAX_DISPUTE_EVIDENCE_LENGTH = 5000;
+const MAX_REVIEW_COMMENT_LENGTH = 2000;
 
 // Returns "buyer", "seller", or null if userId isn't a party to tx.
 function participantRole(tx, userId) {
@@ -329,16 +354,19 @@ router.post("/", async (req, res, next) => {
     // 2. Insert transaction, retrying on the (very unlikely) chance the
     // generated txn_code collides with an existing one.
     let transactionId;
+    let txnCode;
     let attempts = 0;
     let inserted = false;
+
     while (!inserted) {
       attempts++;
-      const txnCode = `TXN-${Date.now()}-${crypto.randomInt(1000, 9999)}`;
+      txnCode = `TXN-${Date.now()}-${crypto.randomInt(1000, 9999)}`;
+
       try {
         const [txnResult] = await conn.query(
-          `INSERT INTO transactions 
-           (txn_code, title, category, amount, currency, buyer_id, seller_id, status, review_days, milestones_count)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO transactions
+       (txn_code, title, category, amount, currency, buyer_id, seller_id, status, review_days, milestones_count)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             txnCode,
             cleanTitle,
@@ -352,6 +380,7 @@ router.post("/", async (req, res, next) => {
             count,
           ],
         );
+
         transactionId = txnResult.insertId;
         inserted = true;
       } catch (err) {
@@ -404,6 +433,46 @@ router.post("/", async (req, res, next) => {
     }
 
     await conn.commit();
+
+    // Send transaction creation notifications
+    notify({
+      userId: buyerId,
+      type: NOTIFICATION_TYPE.TRANSACTION_CREATED,
+      data: {
+        transaction: cleanTitle,
+        amount: parsedAmount,
+        code: txnCode,
+      },
+      email: true,
+      sms: true,
+      push: true,
+    }).catch((err) => console.error("Notification dispatch error:", err));
+
+    notify({
+      userId: sellerId,
+      type: NOTIFICATION_TYPE.TRANSACTION_CREATED,
+      data: {
+        transaction: cleanTitle,
+        amount: parsedAmount,
+        code: txnCode,
+      },
+      email: true,
+      sms: true,
+      push: true,
+    }).catch((err) => console.error("Notification dispatch error:", err));
+
+    // The first milestone is set to DUE, notify the buyer
+    notify({
+      userId: buyerId,
+      type: NOTIFICATION_TYPE.MILESTONE_DUE,
+      data: {
+        milestone: `Milestone 1 of ${count}`,
+        transaction: cleanTitle,
+      },
+      email: true,
+      sms: true,
+      push: true,
+    }).catch((err) => console.error("Notification dispatch error:", err));
 
     // Fetch full newly created transaction
     const [newTxn] = await conn.query(
@@ -671,6 +740,57 @@ router.patch("/:id/status", async (req, res, next) => {
     }
 
     await conn.commit();
+
+    // Send notifications after commit
+    const notifyRole = (roleId, type, data) => {
+      notify({
+        userId: roleId,
+        type,
+        data,
+        email: true,
+        sms: true,
+        push: true,
+      }).catch((err) => console.error("Notification dispatch error:", err));
+    };
+
+    if (nextStatus === TRANSACTION_STATUS.COMPLETED) {
+      notifyRole(tx.buyer_id, NOTIFICATION_TYPE.TRANSACTION_COMPLETED, {
+        transaction: tx.title,
+      });
+      notifyRole(tx.seller_id, NOTIFICATION_TYPE.TRANSACTION_COMPLETED, {
+        transaction: tx.title,
+      });
+
+      const releaseAmount = parseFloat(currentTx.escrow_balance || 0);
+      notifyRole(tx.seller_id, NOTIFICATION_TYPE.WALLET_FUNDED, {
+        amount: releaseAmount.toFixed(2),
+        balance: (
+          parseFloat(currentTx.released_amount || 0) + releaseAmount
+        ).toFixed(2),
+      });
+    } else {
+      notifyRole(tx.buyer_id, NOTIFICATION_TYPE.TRANSACTION_STATUS_CHANGED, {
+        transaction: tx.title,
+        status: nextStatus,
+        fromStatus: previousStatus,
+        note: ai_audit_note || "",
+      });
+      notifyRole(tx.seller_id, NOTIFICATION_TYPE.TRANSACTION_STATUS_CHANGED, {
+        transaction: tx.title,
+        status: nextStatus,
+        fromStatus: previousStatus,
+        note: ai_audit_note || "",
+      });
+
+      if (
+        nextStatus === TRANSACTION_STATUS.INPROGRESS &&
+        previousStatus === TRANSACTION_STATUS.FUNDED
+      ) {
+        notifyRole(tx.buyer_id, NOTIFICATION_TYPE.TRANSACTION_STARTED, {
+          transaction: tx.title,
+        });
+      }
+    }
 
     res.json({
       message: "Transaction updated successfully.",
@@ -1021,6 +1141,47 @@ router.patch("/milestones/:id/status", async (req, res, next) => {
 
     await conn.commit();
 
+    // Send notifications after commit
+    if (status === MILESTONE_STATUS.SUBMITTED) {
+      notify({
+        userId: tx.buyer_id,
+        type: NOTIFICATION_TYPE.MILESTONE_SUBMITTED,
+        data: {
+          milestone: milestone.title,
+          transaction: tx.title,
+          note: deliverableNote || "",
+        },
+        email: true,
+        sms: true,
+        push: true,
+      }).catch((err) => console.error("Notification dispatch error:", err));
+    } else if (status === MILESTONE_STATUS.APPROVED) {
+      notify({
+        userId: tx.seller_id,
+        type: NOTIFICATION_TYPE.MILESTONE_APPROVED,
+        data: {
+          milestone: milestone.title,
+          transaction: tx.title,
+        },
+        email: true,
+        sms: true,
+        push: true,
+      }).catch((err) => console.error("Notification dispatch error:", err));
+    } else if (status === MILESTONE_STATUS.REJECTED) {
+      notify({
+        userId: tx.seller_id,
+        type: NOTIFICATION_TYPE.MILESTONE_REJECTED,
+        data: {
+          milestone: milestone.title,
+          transaction: tx.title,
+          note: deliverableNote || "",
+        },
+        email: true,
+        sms: true,
+        push: true,
+      }).catch((err) => console.error("Notification dispatch error:", err));
+    }
+
     res.json({
       message: "Milestone updated successfully.",
       status,
@@ -1147,7 +1308,7 @@ router.post("/milestones/:id/pay", async (req, res, next) => {
         conn,
         transaction: tx,
         userId,
-        nextStatus: TRANSACTION_STATUS.ACTIVE,
+        nextStatus: TRANSACTION_STATUS.FUNDED,
         action: "escrow_funded",
       });
 
@@ -1157,8 +1318,8 @@ router.post("/milestones/:id/pay", async (req, res, next) => {
         userId,
         action: "transaction_activated",
         fromStatus: TRANSACTION_STATUS.PENDING,
-        toStatus: TRANSACTION_STATUS.ACTIVE,
-        note: "First milestone funded. Escrow is now active.",
+        toStatus: TRANSACTION_STATUS.FUNDED,
+        note: "First milestone funded.",
       });
     }
 
@@ -1204,10 +1365,26 @@ router.post("/milestones/:id/pay", async (req, res, next) => {
             milestoneId: nextMilestone.id,
           },
         });
+
+        // Notify buyer that the next milestone is now due
+        notify({
+          userId: tx.buyer_id,
+          type: NOTIFICATION_TYPE.MILESTONE_DUE,
+          data: {
+            milestone: nextMilestone.title,
+            transaction: tx.title,
+          },
+          email: true,
+          sms: true,
+          push: true,
+        }).catch((err) => console.error("Notification dispatch error:", err));
       }
     }
 
-    // Check if all milestones are paid
+    // If all milestones are now paid and the transaction is still FUNDED,
+    // auto-advance to INPROGRESS so the seller can start work.
+    // Failure here must NOT roll back the payment itself, so we catch
+    // the error and log it rather than re-throwing.
     const [updatedMilestones] = await conn.query(
       "SELECT * FROM milestones WHERE transaction_id = ?",
       [tx.id],
@@ -1216,38 +1393,81 @@ router.post("/milestones/:id/pay", async (req, res, next) => {
       (m) => m.status === MILESTONE_STATUS.PAID,
     );
 
-    // // change" instead of two divergent code paths.
-    // if (allPaid && tx.status === TRANSACTION_STATUS.ACTIVE) {
-    //   try {
-    //     await updateTransactionStatus({
-    //       conn,
-    //       transaction: tx,
-    //       userId,
-    //       nextStatus: TRANSACTION_STATUS.INPROGRESS,
-    //       action: "all_milestones_funded",
-    //     });
+    if (allPaid && tx.status === TRANSACTION_STATUS.FUNDED) {
+      try {
+        // Re-read the transaction so the service sees the FUNDED status that
+        // updateTransactionStatus wrote in the PENDING→FUNDED step above.
+        const [freshTxs] = await conn.query(
+          "SELECT * FROM transactions WHERE id = ? FOR UPDATE",
+          [tx.id],
+        );
+        const freshTx = freshTxs[0];
 
-    //     await logTransactionEvent({
-    //       conn,
-    //       transactionId: tx.id,
-    //       userId,
-    //       action: "all_milestones_paid",
-    //       fromStatus: tx.status,
-    //       toStatus: TRANSACTION_STATUS.INPROGRESS,
-    //       note: "All milestones have been funded",
-    //     });
-    //   } catch (err) {
-    //     // The payment itself already succeeded at this point - don't let a
-    //     // failure in the auto-advance step roll back a successful payment.
-    //     // Surface it loudly instead of swallowing it silently.
-    //     console.error(
-    //       `Failed to auto-advance transaction ${tx.id} to "inprogress" after full funding:`,
-    //       err,
-    //     );
-    //   }
-    // }
+        await updateTransactionStatus({
+          conn,
+          transaction: freshTx,
+          userId,
+          nextStatus: TRANSACTION_STATUS.INPROGRESS,
+        });
+
+        await logTransactionEvent({
+          conn,
+          transactionId: tx.id,
+          userId,
+          action: "all_milestones_funded",
+          fromStatus: TRANSACTION_STATUS.FUNDED,
+          toStatus: TRANSACTION_STATUS.INPROGRESS,
+          note: "All milestones funded. Transaction moved to in-progress.",
+        });
+      } catch (advanceErr) {
+        // Non-fatal: the payment succeeded — just surface the error loudly.
+        console.error(
+          `[milestones/pay] Failed to auto-advance transaction ${tx.id} to INPROGRESS:`,
+          advanceErr,
+        );
+      }
+    }
 
     await conn.commit();
+
+    // Send notifications after payment commits
+    notify({
+      userId: tx.buyer_id,
+      type: NOTIFICATION_TYPE.WALLET_WITHDRAWN,
+      data: {
+        amount: amount.toFixed(2),
+        balance: newBalance.toFixed(2),
+      },
+      email: true,
+      sms: true,
+      push: true,
+    }).catch((err) => console.error("Notification dispatch error:", err));
+
+    notify({
+      userId: tx.buyer_id,
+      type: NOTIFICATION_TYPE.MILESTONE_PAID,
+      data: {
+        milestone: milestone.title,
+        transaction: tx.title,
+        amount: amount.toFixed(2),
+      },
+      email: true,
+      sms: true,
+      push: true,
+    }).catch((err) => console.error("Notification dispatch error:", err));
+
+    notify({
+      userId: tx.seller_id,
+      type: NOTIFICATION_TYPE.TRANSACTION_FUNDED,
+      data: {
+        transaction: tx.title,
+        amount: amount.toFixed(2),
+      },
+      email: true,
+      sms: true,
+      push: true,
+    }).catch((err) => console.error("Notification dispatch error:", err));
+
     res.json({ message: "Milestone payment successful.", balance: newBalance });
   } catch (error) {
     await conn.rollback();
@@ -1261,14 +1481,38 @@ router.post("/milestones/:id/pay", async (req, res, next) => {
 
 // 8. POST /:id/dispute - File a dispute
 router.post("/:id/dispute", async (req, res, next) => {
-  const transactionId = req.params.id;
+  const paramId = req.params.id;
   const { reason, evidence } = req.body;
   const userId = req.user.id;
 
-  if (!reason || !reason.trim()) {
+  // Validate and trim reason before opening a DB connection.
+  const cleanReason = typeof reason === "string" ? reason.trim() : "";
+  if (!cleanReason) {
+    return res.status(400).json({ error: "Reason is required." });
+  }
+  if (cleanReason.length > MAX_DISPUTE_REASON_LENGTH) {
     return res.status(400).json({
-      error: "Reason is required.",
+      error: `Reason must be ${MAX_DISPUTE_REASON_LENGTH} characters or fewer.`,
     });
+  }
+
+  const cleanEvidence =
+    evidence !== undefined && evidence !== null
+      ? String(evidence).trim()
+      : null;
+  if (
+    cleanEvidence !== null &&
+    cleanEvidence.length > MAX_DISPUTE_EVIDENCE_LENGTH
+  ) {
+    return res.status(400).json({
+      error: `Evidence must be ${MAX_DISPUTE_EVIDENCE_LENGTH} characters or fewer.`,
+    });
+  }
+
+  // Resolve transaction ID (supports both numeric id and txn_code)
+  const transactionId = await resolveTransactionId(paramId);
+  if (transactionId === null) {
+    return res.status(404).json({ error: "Transaction not found." });
   }
 
   const conn = await db.getPool().getConnection();
@@ -1291,10 +1535,14 @@ router.post("/:id/dispute", async (req, res, next) => {
       return rollbackWithError(conn, res, 403, "Access denied.");
     }
 
+    // Derive the disputable states from the state machine:
+    // any status that has DISPUTED as a valid next state.
     const disputableStatuses = [
-      TRANSACTION_STATUS.ACTIVE,
+      TRANSACTION_STATUS.FUNDED,
       TRANSACTION_STATUS.INPROGRESS,
-      TRANSACTION_STATUS.REVIEW,
+      TRANSACTION_STATUS.INSPECTION,
+      TRANSACTION_STATUS.REVISION,
+      TRANSACTION_STATUS.AUDIT,
     ];
 
     if (!disputableStatuses.includes(transaction.status)) {
@@ -1307,14 +1555,11 @@ router.post("/:id/dispute", async (req, res, next) => {
     }
 
     const [existingDisputes] = await conn.query(
-      `
-    SELECT id
-    FROM disputes
-    WHERE transaction_id = ?
-      AND status IN ('filed', 'under_review')
-    LIMIT 1
-  `,
-      [transaction.id],
+      `SELECT id FROM disputes
+       WHERE transaction_id = ?
+         AND status IN (?, ?)
+       LIMIT 1`,
+      [transaction.id, DISPUTE_STATUS.FILED, DISPUTE_STATUS.UNDER_REVIEW],
     );
 
     if (existingDisputes.length) {
@@ -1327,17 +1572,9 @@ router.post("/:id/dispute", async (req, res, next) => {
     }
 
     const [result] = await conn.query(
-      `
-    INSERT INTO disputes
-    (transaction_id, filed_by, reason, evidence)
-    VALUES (?, ?, ?, ?)
-  `,
-      [
-        transaction.id,
-        userId,
-        reason.trim(),
-        evidence ? evidence.trim() : null,
-      ],
+      `INSERT INTO disputes (transaction_id, filed_by, reason, evidence)
+       VALUES (?, ?, ?, ?)`,
+      [transaction.id, userId, cleanReason, cleanEvidence || null],
     );
 
     const disputeId = result.insertId;
@@ -1347,7 +1584,6 @@ router.post("/:id/dispute", async (req, res, next) => {
       transaction,
       userId,
       nextStatus: TRANSACTION_STATUS.DISPUTED,
-      action: "dispute_filed",
     });
 
     await logTransactionEvent({
@@ -1357,13 +1593,35 @@ router.post("/:id/dispute", async (req, res, next) => {
       action: "dispute_filed",
       fromStatus: transaction.status,
       toStatus: TRANSACTION_STATUS.DISPUTED,
-      note: reason.trim(),
-      metadata: {
-        disputeId,
-      },
+      note: cleanReason,
+      metadata: { disputeId },
     });
 
     await conn.commit();
+
+    notify({
+      userId: transaction.buyer_id,
+      type: NOTIFICATION_TYPE.DISPUTE_FILED,
+      data: {
+        transaction: transaction.title,
+        reason: cleanReason,
+      },
+      email: true,
+      sms: true,
+      push: true,
+    }).catch((err) => console.error("Notification dispatch error:", err));
+
+    notify({
+      userId: transaction.seller_id,
+      type: NOTIFICATION_TYPE.DISPUTE_FILED,
+      data: {
+        transaction: transaction.title,
+        reason: cleanReason,
+      },
+      email: true,
+      sms: true,
+      push: true,
+    }).catch((err) => console.error("Notification dispatch error:", err));
 
     res.status(201).json({
       message: "Dispute filed successfully.",
@@ -1378,7 +1636,6 @@ router.post("/:id/dispute", async (req, res, next) => {
 });
 
 // 9. GET /:id/dispute
-// 9. GET /:id/dispute
 router.get("/:id/dispute", async (req, res, next) => {
   const paramId = req.params.id;
   const userId = req.user.id;
@@ -1387,49 +1644,39 @@ router.get("/:id/dispute", async (req, res, next) => {
     const transactionId = await resolveTransactionId(paramId);
 
     if (transactionId === null) {
-      return res.status(404).json({
-        error: "Transaction not found.",
-      });
+      return res.status(404).json({ error: "Transaction not found." });
     }
 
-    const [transactions] = await db
-      .getPool()
-      .query("SELECT * FROM transactions WHERE id = ?", [transactionId]);
+    const txs = await db.query("SELECT * FROM transactions WHERE id = ?", [
+      transactionId,
+    ]);
 
-    if (!transactions.length) {
-      return res.status(404).json({
-        error: "Transaction not found.",
-      });
+    if (!txs.length) {
+      return res.status(404).json({ error: "Transaction not found." });
     }
 
-    const transaction = transactions[0];
+    const transaction = txs[0];
 
     if (!isParticipant(transaction, userId)) {
-      return res.status(403).json({
-        error: "Access denied.",
-      });
+      return res.status(403).json({ error: "Access denied." });
     }
 
-    const [disputes] = await db.getPool().query(
-      `
-      SELECT
-        d.*,
-        u.name AS filed_by_name,
-        u.email AS filed_by_email
-      FROM disputes d
-      JOIN users u
-        ON d.filed_by = u.id
-      WHERE d.transaction_id = ?
-      ORDER BY d.created_at DESC
-      LIMIT 1
-      `,
+    const disputes = await db.query(
+      `SELECT d.*,
+              u.name  AS filed_by_name,
+              u.email AS filed_by_email
+       FROM disputes d
+       JOIN users u ON d.filed_by = u.id
+       WHERE d.transaction_id = ?
+       ORDER BY d.created_at DESC
+       LIMIT 1`,
       [transaction.id],
     );
 
     if (!disputes.length) {
-      return res.status(404).json({
-        error: "No dispute found for this transaction.",
-      });
+      return res
+        .status(404)
+        .json({ error: "No dispute found for this transaction." });
     }
 
     res.json(disputes[0]);
@@ -1499,16 +1746,14 @@ router.patch("/:id/dispute/resolve", async (req, res, next) => {
 
     // ── 6. Lock dispute row FOR UPDATE ───────────────────────────────────────
     const [disputes] = await conn.query(
-      `
-        SELECT *
-        FROM disputes
-        WHERE transaction_id = ?
-          AND status IN ('filed', 'under_review')
-        ORDER BY created_at DESC
-        LIMIT 1
-        FOR UPDATE
-      `,
-      [transaction.id],
+      `SELECT *
+       FROM disputes
+       WHERE transaction_id = ?
+         AND status IN (?, ?)
+       ORDER BY created_at DESC
+       LIMIT 1
+       FOR UPDATE`,
+      [transaction.id, DISPUTE_STATUS.FILED, DISPUTE_STATUS.UNDER_REVIEW],
     );
 
     if (!disputes.length) {
@@ -1525,7 +1770,7 @@ router.patch("/:id/dispute/resolve", async (req, res, next) => {
     // ── 7. Prevent double-resolve ────────────────────────────────────────────
     //  (The query above already filters to filed/under_review, but this guard
     //   makes the rejection reason explicit for the caller.)
-    if (dispute.status === "resolved") {
+    if (dispute.status === DISPUTE_STATUS.RESOLVED) {
       return rollbackWithError(
         conn,
         res,
@@ -1598,24 +1843,23 @@ router.patch("/:id/dispute/resolve", async (req, res, next) => {
 
     // ── 10. Update dispute → resolved ────────────────────────────────────────
     await conn.query(
-      `
-        UPDATE disputes
-        SET
-          status     = 'resolved',
-          resolution = ?,
-          updated_at = NOW()
-        WHERE id = ?
-      `,
-      [cleanResolution, dispute.id],
+      `UPDATE disputes
+       SET status     = ?,
+           resolution = ?,
+           updated_at = NOW()
+       WHERE id = ?`,
+      [DISPUTE_STATUS.RESOLVED, cleanResolution, dispute.id],
     );
 
-    // ── 11. Update transaction status → COMPLETED ────────────────────────────
+    // ── 11. Update transaction status → COMPLETED via the central service ────
     //  Both paths (buyer wins / seller wins) close the escrow as COMPLETED.
     //  The state machine allows DISPUTED → COMPLETED.
-    await conn.query(
-      "UPDATE transactions SET status = ?, updated_at = NOW() WHERE id = ?",
-      [TRANSACTION_STATUS.COMPLETED, transaction.id],
-    );
+    await updateTransactionStatus({
+      conn,
+      transaction,
+      userId: adminId,
+      nextStatus: TRANSACTION_STATUS.COMPLETED,
+    });
 
     // ── 12. Log admin decision event ─────────────────────────────────────────
     await logTransactionEvent({
@@ -1636,6 +1880,58 @@ router.patch("/:id/dispute/resolve", async (req, res, next) => {
     });
 
     await conn.commit();
+
+    notify({
+      userId: transaction.buyer_id,
+      type: NOTIFICATION_TYPE.DISPUTE_RESOLVED,
+      data: {
+        transaction: transaction.title,
+        resolution: cleanResolution,
+        winner,
+      },
+      email: true,
+      sms: true,
+      push: true,
+    }).catch((err) => console.error("Notification dispatch error:", err));
+
+    notify({
+      userId: transaction.seller_id,
+      type: NOTIFICATION_TYPE.DISPUTE_RESOLVED,
+      data: {
+        transaction: transaction.title,
+        resolution: cleanResolution,
+        winner,
+      },
+      email: true,
+      sms: true,
+      push: true,
+    }).catch((err) => console.error("Notification dispatch error:", err));
+
+    if (winner === "seller") {
+      notify({
+        userId: transaction.seller_id,
+        type: NOTIFICATION_TYPE.WALLET_FUNDED,
+        data: {
+          amount: escrowAmount.toFixed(2),
+          balance: balance.toFixed(2),
+        },
+        email: true,
+        sms: true,
+        push: true,
+      }).catch((err) => console.error("Notification dispatch error:", err));
+    } else {
+      notify({
+        userId: transaction.buyer_id,
+        type: NOTIFICATION_TYPE.WALLET_REFUNDED,
+        data: {
+          amount: escrowAmount.toFixed(2),
+          transaction: transaction.title,
+        },
+        email: true,
+        sms: true,
+        push: true,
+      }).catch((err) => console.error("Notification dispatch error:", err));
+    }
 
     return res.json({
       message: "Dispute resolved successfully.",
@@ -1658,66 +1954,82 @@ router.post("/:id/review", async (req, res, next) => {
   const { rating, comment } = req.body;
 
   try {
+    // Resolve before opening a DB connection so we fail fast on a bad ID.
     const transactionId = await resolveTransactionId(paramId);
     if (transactionId === null) {
       return res.status(404).json({ error: "Transaction not found." });
     }
 
-    const txs = await db.query("SELECT * FROM transactions WHERE id = ?", [transactionId]);
+    const txs = await db.query("SELECT * FROM transactions WHERE id = ?", [
+      transactionId,
+    ]);
     if (txs.length === 0) {
       return res.status(404).json({ error: "Transaction not found." });
     }
 
     const tx = txs[0];
 
-    // 1. Validate transaction is COMPLETED
-    if (tx.status.toLowerCase() !== "completed") {
-      return res.status(400).json({ error: "Reviews can only be submitted after a transaction is completed." });
+    // 1. Participant guard — before exposing any detail.
+    if (!isParticipant(tx, userId)) {
+      return res.status(403).json({
+        error: "Access denied. Only transaction participants can review.",
+      });
     }
 
-    // 2. Validate user is participant
-    if (tx.buyer_id !== userId && tx.seller_id !== userId) {
-      return res.status(403).json({ error: "Access denied. Only transaction participants can review." });
+    // 2. Transaction must be COMPLETED.
+    if (tx.status !== TRANSACTION_STATUS.COMPLETED) {
+      return res.status(400).json({
+        error:
+          "Reviews can only be submitted after a transaction is completed.",
+      });
     }
 
     const reviewer_id = userId;
     const reviewee_id = userId === tx.buyer_id ? tx.seller_id : tx.buyer_id;
 
-    // 3. User cannot review themselves
+    // 3. User cannot review themselves.
     if (reviewer_id === reviewee_id) {
       return res.status(400).json({ error: "You cannot review yourself." });
     }
 
-    // 4. Validate rating (1-5, not empty)
+    // 4. Validate rating (1–5, required).
     if (rating === undefined || rating === null) {
       return res.status(400).json({ error: "Rating is required." });
     }
     const ratingInt = parseInt(rating);
     if (isNaN(ratingInt) || ratingInt < 1 || ratingInt > 5) {
-      return res.status(400).json({ error: "Rating must be an integer between 1 and 5." });
+      return res
+        .status(400)
+        .json({ error: "Rating must be an integer between 1 and 5." });
     }
 
-    // 5. Prevent duplicate reviews
-    const existing = await db.query(
-      "SELECT id FROM reviews WHERE transaction_id = ? AND reviewer_id = ?",
-      [transactionId, reviewer_id]
-    );
-    if (existing.length > 0) {
-      return res.status(400).json({ error: "You have already submitted a review for this transaction." });
+    // 5. Validate optional comment length.
+    const cleanComment =
+      comment !== undefined && comment !== null ? String(comment).trim() : null;
+    if (
+      cleanComment !== null &&
+      cleanComment.length > MAX_REVIEW_COMMENT_LENGTH
+    ) {
+      return res.status(400).json({
+        error: `Comment must be ${MAX_REVIEW_COMMENT_LENGTH} characters or fewer.`,
+      });
     }
 
+    // 6. Insert inside a transaction so the duplicate check (UNIQUE KEY) and
+    //    the event log are atomic. Catch ER_DUP_ENTRY to return a clean 400
+    //    instead of a 500 if two requests race.
     const conn = await db.getPool().getConnection();
+    let insertedId;
     try {
       await conn.beginTransaction();
 
-      // Insert review
       const [insertResult] = await conn.query(
         `INSERT INTO reviews (transaction_id, reviewer_id, reviewee_id, rating, comment)
          VALUES (?, ?, ?, ?, ?)`,
-        [transactionId, reviewer_id, reviewee_id, ratingInt, comment ? String(comment).trim() : null]
+        [transactionId, reviewer_id, reviewee_id, ratingInt, cleanComment],
       );
+      insertedId = insertResult.insertId;
 
-      // Log transaction event
       await logTransactionEvent({
         conn,
         transactionId,
@@ -1725,17 +2037,37 @@ router.post("/:id/review", async (req, res, next) => {
         action: "review_submitted",
         note: `Review submitted by ${req.user.name || "User"} with rating ${ratingInt}`,
         metadata: {
-          reviewId: insertResult.insertId,
+          reviewId: insertedId,
           rating: ratingInt,
-          comment,
+          comment: cleanComment,
           reviewer_id,
           reviewee_id,
         },
       });
 
       await conn.commit();
+
+      notify({
+        userId: reviewee_id,
+        type: NOTIFICATION_TYPE.REVIEW_RECEIVED,
+        data: {
+          reviewer: req.user.name || "User",
+          transaction: tx.title,
+          rating: ratingInt,
+          comment: cleanComment || "",
+        },
+        email: true,
+        sms: true,
+        push: true,
+      }).catch((err) => console.error("Notification dispatch error:", err));
     } catch (err) {
       await conn.rollback();
+      // ER_DUP_ENTRY means the DB UNIQUE constraint caught a concurrent insert.
+      if (err.code === "ER_DUP_ENTRY") {
+        return res.status(400).json({
+          error: "You have already submitted a review for this transaction.",
+        });
+      }
       throw err;
     } finally {
       conn.release();
@@ -1748,7 +2080,7 @@ router.post("/:id/review", async (req, res, next) => {
         reviewer_id,
         reviewee_id,
         rating: ratingInt,
-        comment,
+        comment: cleanComment,
       },
     });
   } catch (error) {
@@ -1756,9 +2088,10 @@ router.post("/:id/review", async (req, res, next) => {
   }
 });
 
-// 13. GET /:id/review - Get reviews for a transaction
+// 13. GET /:id/review - Get reviews for a transaction (participants only)
 router.get("/:id/review", async (req, res, next) => {
   const paramId = req.params.id;
+  const userId = req.user.id;
 
   try {
     const transactionId = await resolveTransactionId(paramId);
@@ -1766,16 +2099,30 @@ router.get("/:id/review", async (req, res, next) => {
       return res.status(404).json({ error: "Transaction not found." });
     }
 
+    // Participant guard — load transaction before returning any review data.
+    const txs = await db.query("SELECT * FROM transactions WHERE id = ?", [
+      transactionId,
+    ]);
+    if (txs.length === 0) {
+      return res.status(404).json({ error: "Transaction not found." });
+    }
+
+    if (!isParticipant(txs[0], userId)) {
+      return res.status(403).json({ error: "Access denied." });
+    }
+
     const reviews = await db.query(
       `SELECT r.*,
-              u_reviewer.name as reviewer_name, u_reviewer.email as reviewer_email,
-              u_reviewee.name as reviewee_name, u_reviewee.email as reviewee_email
+              u_reviewer.name  AS reviewer_name,
+              u_reviewer.email AS reviewer_email,
+              u_reviewee.name  AS reviewee_name,
+              u_reviewee.email AS reviewee_email
        FROM reviews r
        JOIN users u_reviewer ON r.reviewer_id = u_reviewer.id
        JOIN users u_reviewee ON r.reviewee_id = u_reviewee.id
        WHERE r.transaction_id = ?
        ORDER BY r.created_at DESC`,
-      [transactionId]
+      [transactionId],
     );
 
     return res.json(reviews);
@@ -1785,4 +2132,3 @@ router.get("/:id/review", async (req, res, next) => {
 });
 
 export default router;
-

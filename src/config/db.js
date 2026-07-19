@@ -102,47 +102,46 @@ async function runMigrations(conn) {
       name: "phone",
       definition: "VARCHAR(20) DEFAULT NULL",
     },
-
     {
       name: "phone_verified",
       definition: "TINYINT(1) NOT NULL DEFAULT 0",
     },
-
     {
       name: "phone_verified_at",
       definition: "TIMESTAMP NULL DEFAULT NULL",
     },
-
+    {
+      name: "kyc_tier",
+      definition: "INT NOT NULL DEFAULT 1",
+    },
+    {
+      name: "is_verified",
+      definition: "TINYINT(1) NOT NULL DEFAULT 0",
+    },
     {
       name: "email_verified_at",
       definition: "TIMESTAMP NULL DEFAULT NULL",
     },
-
     {
       name: "two_factor_enabled",
       definition: "TINYINT(1) NOT NULL DEFAULT 0",
     },
-
     {
       name: "notif_email",
       definition: "TINYINT(1) NOT NULL DEFAULT 1",
     },
-
     {
       name: "notif_sms",
       definition: "TINYINT(1) NOT NULL DEFAULT 0",
     },
-
     {
       name: "notif_push",
       definition: "TINYINT(1) NOT NULL DEFAULT 1",
     },
-
     {
       name: "public_profile",
       definition: "TINYINT(1) NOT NULL DEFAULT 1",
     },
-
     {
       name: "marketing_comms",
       definition: "TINYINT(1) NOT NULL DEFAULT 0",
@@ -182,7 +181,7 @@ async function runMigrations(conn) {
 
     {
       name: "code",
-      definition: "VARCHAR(10) NOT NULL",
+      definition: "VARCHAR(255) NOT NULL",
     },
 
     {
@@ -238,17 +237,6 @@ async function runMigrations(conn) {
   try {
     await conn.query(`
     ALTER TABLE otp_codes
-    MODIFY COLUMN code VARCHAR(255) NOT NULL
-  `);
-
-    console.log("Migration: otp_codes.code expanded to VARCHAR(255).");
-  } catch (err) {
-    console.error("Failed updating otp_codes.code", err);
-  }
-
-  try {
-    await conn.query(`
-    ALTER TABLE otp_codes
     MODIFY COLUMN type ENUM(
       'signup',
       'forgot',
@@ -267,106 +255,89 @@ async function runMigrations(conn) {
 
   try {
     await conn.query(`
-    UPDATE users
-    SET phone_verified = 0
-    WHERE phone_verified IS NULL
-      OR phone_verified = ''
+  UPDATE users
+SET phone_verified = 0
+WHERE phone_verified IS NULL;
+
+`);
+    await conn.query(`
+UPDATE users
+SET kyc_tier = 1
+WHERE kyc_tier IS NULL;
+`);
+
+    await conn.query(`
+UPDATE users
+SET is_verified = 0
+WHERE is_verified IS NULL;
 `);
   } catch (err) {
     console.error("Migration failed:", err);
   }
 
-  // Create kyc_submissions table
+  // ----------------------------------------------------
+  // FIX milestones.status ENUM (add submitted/approved/rejected)
+  // ----------------------------------------------------
+
   try {
     await conn.query(`
-      CREATE TABLE IF NOT EXISTS \`kyc_submissions\` (
-        \`id\` INT AUTO_INCREMENT PRIMARY KEY,
-        \`user_id\` INT NOT NULL,
-        \`phone\` VARCHAR(50) NOT NULL,
-        \`id_type\` VARCHAR(50) NOT NULL,
-        \`id_number\` VARCHAR(100) NOT NULL,
-        \`id_file\` VARCHAR(255) NOT NULL,
-        \`selfie_file\` VARCHAR(255) DEFAULT NULL,
-        \`biz_name\` VARCHAR(255) DEFAULT NULL,
-        \`biz_reg\` VARCHAR(100) DEFAULT NULL,
-        \`biz_file\` VARCHAR(255) DEFAULT NULL,
-        \`incorp_file\` VARCHAR(255) DEFAULT NULL,
-        \`status\` ENUM('pending', 'approved', 'rejected') NOT NULL DEFAULT 'pending',
-        \`rejection_reason\` TEXT DEFAULT NULL,
-        \`created_at\` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        \`updated_at\` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    ALTER TABLE transactions
+    MODIFY COLUMN status ENUM(
+      'pending',
+      'funded',
+      'inprogress',
+      'inspection',
+      'audit',
+      'approved',
+      'revision',
+      'completed',
+      'disputed'
+    ) NOT NULL DEFAULT 'pending'
+  `);
+
+    console.log("Migration: transactions.status updated.");
+  } catch (err) {
+    console.error("Failed updating transactions.status:", err);
+  }
+
+  try {
+    await conn.query(`
+      ALTER TABLE milestones
+      MODIFY COLUMN status ENUM(
+        'pending', 'paid', 'due', 'upcoming',
+        'submitted', 'approved', 'rejected'
+      ) NOT NULL DEFAULT 'pending'
+    `);
+    console.log("Migration: milestones.status ENUM updated.");
+  } catch (err) {
+    console.error("Migration failed to update milestones.status ENUM:", err);
+  }
+
+  // ----------------------------------------------------
+  // CREATE notifications TABLE
+  // ----------------------------------------------------
+
+  try {
+    await conn.query(`
+      CREATE TABLE IF NOT EXISTS \`notifications\` (
+        \`id\`         INT AUTO_INCREMENT PRIMARY KEY,
+        \`user_id\`    INT          NOT NULL,
+        \`type\`       VARCHAR(60)  NOT NULL,
+        \`title\`      VARCHAR(255) NOT NULL,
+        \`message\`    TEXT         NOT NULL,
+        \`channel\`    ENUM('in_app','email','sms','push') NOT NULL DEFAULT 'in_app',
+        \`is_read\`    TINYINT(1)   NOT NULL DEFAULT 0,
+        \`metadata\`   JSON         DEFAULT NULL,
+        \`created_at\` TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+        \`updated_at\` TIMESTAMP    DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX \`idx_notifications_user_read\` (\`user_id\`, \`is_read\`),
+        INDEX \`idx_notifications_type\`      (\`type\`),
         FOREIGN KEY (\`user_id\`) REFERENCES \`users\` (\`id\`) ON DELETE CASCADE
       ) ENGINE=InnoDB;
     `);
-    console.log("Migration: kyc_submissions table checked/created.");
+    console.log("Migration: notifications table checked/created.");
   } catch (err) {
-    console.error(
-      "Migration failed to create/verify kyc_submissions table:",
-      err,
-    );
-  }
-
-  // ----------------------------------------------------
-  // CREATE transaction_events TABLE
-  // ----------------------------------------------------
-
-  try {
-    await conn.query(`
-    CREATE TABLE IF NOT EXISTS transaction_events (
-      id INT AUTO_INCREMENT PRIMARY KEY,
-
-      transaction_id INT NOT NULL,
-      user_id INT NOT NULL,
-
-      action VARCHAR(50) NOT NULL,
-
-      from_status VARCHAR(50),
-      to_status VARCHAR(50),
-
-      note TEXT,
-
-      metadata JSON NULL,
-
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-
-      CONSTRAINT fk_event_transaction
-        FOREIGN KEY (transaction_id)
-        REFERENCES transactions(id)
-        ON DELETE CASCADE,
-
-      CONSTRAINT fk_event_user
-        FOREIGN KEY (user_id)
-        REFERENCES users(id)
-        ON DELETE CASCADE
-    ) ENGINE=InnoDB;
-  `);
-
-    console.log("Migration: transaction_events table checked/created.");
-  } catch (err) {
-    console.error("Migration failed to create transaction_events table:", err);
-  }
-
-  // Create reviews table
-  try {
-    await conn.query(`
-      CREATE TABLE IF NOT EXISTS \`reviews\` (
-        \`id\` INT AUTO_INCREMENT PRIMARY KEY,
-        \`transaction_id\` INT NOT NULL,
-        \`reviewer_id\` INT NOT NULL,
-        \`reviewee_id\` INT NOT NULL,
-        \`rating\` INT NOT NULL,
-        \`comment\` TEXT DEFAULT NULL,
-        \`created_at\` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        \`updated_at\` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-        FOREIGN KEY (\`transaction_id\`) REFERENCES \`transactions\` (\`id\`) ON DELETE CASCADE,
-        FOREIGN KEY (\`reviewer_id\`) REFERENCES \`users\` (\`id\`) ON DELETE CASCADE,
-        FOREIGN KEY (\`reviewee_id\`) REFERENCES \`users\` (\`id\`) ON DELETE CASCADE,
-        UNIQUE KEY \`unique_reviewer_transaction\` (\`transaction_id\`, \`reviewer_id\`)
-      ) ENGINE=InnoDB;
-    `);
-    console.log("Migration: reviews table checked/created.");
-  } catch (err) {
-    console.error("Migration failed to create reviews table:", err);
+    console.error("Migration failed to create notifications table:", err);
   }
 }
 

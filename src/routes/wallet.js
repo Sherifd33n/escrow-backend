@@ -2,6 +2,8 @@ import express from "express";
 import db from "../config/db.js";
 import authMiddleware from "../middleware/auth.js";
 import crypto from "crypto";
+import { notify } from "../services/notificationService.js";
+import { NOTIFICATION_TYPE } from "../constants/notificationTypes.js";
 
 const router = express.Router();
 
@@ -101,6 +103,18 @@ router.post("/deposit", async (req, res, next) => {
 
     await conn.commit();
 
+    notify({
+      userId: req.user.id,
+      type: NOTIFICATION_TYPE.WALLET_FUNDED,
+      data: {
+        amount: amountInUSD.toFixed(2),
+        balance: newBalance.toFixed(2),
+      },
+      email: true,
+      sms: true,
+      push: true,
+    }).catch((err) => console.error("Failed to trigger Wallet Funded notification:", err));
+
     res.json({
       message: "Funds deposited successfully.",
       balance: newBalance,
@@ -163,6 +177,18 @@ router.post("/withdraw", async (req, res, next) => {
     );
 
     await conn.commit();
+
+    notify({
+      userId: req.user.id,
+      type: NOTIFICATION_TYPE.WALLET_WITHDRAWN,
+      data: {
+        amount: withdrawAmt.toFixed(2),
+        balance: newBalance.toFixed(2),
+      },
+      email: true,
+      sms: true,
+      push: true,
+    }).catch((err) => console.error("Failed to trigger Wallet Withdrawn notification:", err));
 
     res.json({
       message: "Withdrawal completed successfully.",
@@ -280,6 +306,30 @@ router.post("/transfer", async (req, res, next) => {
     );
 
     await conn.commit();
+
+    notify({
+      userId,
+      type: NOTIFICATION_TYPE.WALLET_WITHDRAWN,
+      data: {
+        amount: transferAmt.toFixed(2),
+        balance: newSenderBalance.toFixed(2),
+      },
+      email: true,
+      sms: true,
+      push: true,
+    }).catch((err) => console.error("Failed to trigger Wallet Withdrawn notification for sender:", err));
+
+    notify({
+      userId: recipientId,
+      type: NOTIFICATION_TYPE.WALLET_FUNDED,
+      data: {
+        amount: transferAmt.toFixed(2),
+        balance: newRecipientBalance.toFixed(2),
+      },
+      email: true,
+      sms: true,
+      push: true,
+    }).catch((err) => console.error("Failed to trigger Wallet Funded notification for recipient:", err));
 
     res.json({
       message: "Transfer completed successfully.",

@@ -5,6 +5,8 @@ import crypto from "crypto";
 import db from "../config/db.js";
 import authMiddleware from "../middleware/auth.js";
 import { sendOTPEmail, sendPasswordResetLink } from "../utils/mailer.js";
+import { notify } from "../services/notificationService.js";
+import { NOTIFICATION_TYPE } from "../constants/notificationTypes.js";
 
 const router = express.Router();
 
@@ -128,6 +130,19 @@ router.post("/signup", async (req, res, next) => {
         console.error("Failed to send signup OTP:", err);
       }
 
+      // Send OTP Sent notification
+      notify({
+        userId,
+        type: NOTIFICATION_TYPE.OTP_SENT,
+        data: {
+          code: otpCode,
+          expiry: expiryMinutes,
+        },
+        email: true,
+        sms: true,
+        push: true,
+      }).catch((err) => console.error("Failed to trigger OTP Sent notification:", err));
+
       // Return details needed by frontend to verify OTP
       res.status(201).json({
         message: "Registration successful. OTP sent.",
@@ -202,6 +217,18 @@ router.post("/login", async (req, res, next) => {
         console.error("Failed to send login OTP:", err);
       }
 
+      notify({
+        userId: user.id,
+        type: NOTIFICATION_TYPE.OTP_SENT,
+        data: {
+          code: otpCode,
+          expiry: expiryMinutes,
+        },
+        email: true,
+        sms: true,
+        push: true,
+      }).catch((err) => console.error("Failed to trigger OTP Sent notification:", err));
+
       return res.status(403).json({
         error: "Please verify your email address. OTP has been sent.",
         unverified: true,
@@ -224,6 +251,19 @@ router.post("/login", async (req, res, next) => {
       "INSERT INTO user_sessions (user_id, token_jti, device, ip_address, location) VALUES (?, ?, ?, ?, ?)",
       [user.id, tokenJti, device, ip, location],
     );
+
+    // Send Security Alert notification on login
+    notify({
+      userId: user.id,
+      type: NOTIFICATION_TYPE.SECURITY_ALERT,
+      data: {
+        device,
+        time: new Date().toLocaleString(),
+      },
+      email: true,
+      sms: true,
+      push: true,
+    }).catch((err) => console.error("Failed to trigger Security Alert notification:", err));
 
     // Generate JWT token including `jti` claim
     const token = jwt.sign(
@@ -310,6 +350,19 @@ router.post("/verify-otp", async (req, res, next) => {
     const users = await db.query("SELECT * FROM users WHERE id = ?", [userId]);
     const user = users[0];
 
+    if (otp.type === "signup" && user) {
+      notify({
+        userId: user.id,
+        type: NOTIFICATION_TYPE.WELCOME,
+        data: {
+          name: user.name,
+        },
+        email: true,
+        sms: true,
+        push: true,
+      }).catch((err) => console.error("Failed to trigger Welcome notification:", err));
+    }
+
     if (!user) {
       return res.status(404).json({
         error: "User not found.",
@@ -331,6 +384,19 @@ router.post("/verify-otp", async (req, res, next) => {
       "INSERT INTO user_sessions (user_id, token_jti, device, ip_address, location) VALUES (?, ?, ?, ?, ?)",
       [user.id, tokenJti, device, ip, location],
     );
+
+    // Send Security Alert notification on OTP login
+    notify({
+      userId: user.id,
+      type: NOTIFICATION_TYPE.SECURITY_ALERT,
+      data: {
+        device,
+        time: new Date().toLocaleString(),
+      },
+      email: true,
+      sms: true,
+      push: true,
+    }).catch((err) => console.error("Failed to trigger Security Alert notification:", err));
 
     // Generate JWT token including `jti` claim
     const token = jwt.sign(
@@ -404,6 +470,18 @@ router.post("/resend-otp", async (req, res, next) => {
       console.error("Failed to resend OTP:", err);
     }
 
+    notify({
+      userId,
+      type: NOTIFICATION_TYPE.OTP_SENT,
+      data: {
+        code: otpCode,
+        expiry: expiryMinutes,
+      },
+      email: true,
+      sms: true,
+      push: true,
+    }).catch((err) => console.error("Failed to trigger OTP Sent notification:", err));
+
     res.json({ message: "A new verification code has been sent." });
   } catch (error) {
     next(error);
@@ -458,6 +536,18 @@ router.post("/forgot-password", async (req, res, next) => {
     } catch (err) {
       console.error("Failed to send password reset email:", err);
     }
+
+    notify({
+      userId,
+      type: NOTIFICATION_TYPE.PASSWORD_RESET,
+      data: {
+        link: resetLink,
+        expiry: expiryMinutes,
+      },
+      email: true,
+      sms: true,
+      push: true,
+    }).catch((err) => console.error("Failed to trigger Password Reset notification:", err));
 
     res.json({ message: "If the email exists, a reset link has been sent." });
   } catch (error) {
@@ -522,6 +612,18 @@ router.post("/reset-password", async (req, res, next) => {
     } finally {
       conn.release();
     }
+
+    notify({
+      userId,
+      type: NOTIFICATION_TYPE.SECURITY_ALERT,
+      data: {
+        device: "Password Reset Link",
+        time: new Date().toLocaleString(),
+      },
+      email: true,
+      sms: true,
+      push: true,
+    }).catch((err) => console.error("Failed to trigger Security Alert notification:", err));
 
     res.json({ message: "Password has been reset successfully." });
   } catch (error) {

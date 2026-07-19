@@ -9,7 +9,8 @@ import walletRoutes from "./routes/wallet.js";
 import adminRoutes from "./routes/admin.js";
 import errorHandler from "./middleware/errorHandler.js";
 
-import exchangeRateRoutes from "./routes/exchangeRate.js";
+import exchangeRateRoutes   from "./routes/exchangeRate.js";
+import notificationsRoutes  from "./routes/notifications.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -40,6 +41,9 @@ app.get("/", (req, res) => {
 
 // Exchange rate
 app.use("/api/exchange-rate", exchangeRateRoutes);
+
+// Notifications
+app.use("/api/notifications", notificationsRoutes);
 
 // Error handling
 app.use(errorHandler);
