@@ -42,18 +42,6 @@ export async function initDatabase() {
       queueLimit: 0,
     });
 
-    const [db] = await pool.query("SELECT DATABASE() AS db");
-    console.log("Connected database:", db[0].db);
-
-    const [tables] = await pool.query("SHOW TABLES");
-    console.log("Tables:", tables);
-
-    const [columns] = await pool.query("SHOW COLUMNS FROM users");
-    console.log(
-      "Users columns:",
-      columns.map((c) => c.Field),
-    );
-
     // Run schema.sql to create tables if they don't exist
     const schemaPath = path.join(__dirname, "schema.sql");
     if (fs.existsSync(schemaPath)) {
@@ -65,6 +53,18 @@ export async function initDatabase() {
 
         // Run migration to add columns if they are missing
         await runMigrations(conn);
+
+        const [db] = await pool.query("SELECT DATABASE() AS db");
+        console.log("Connected database:", db[0].db);
+
+        const [tables] = await pool.query("SHOW TABLES");
+        console.log("Tables:", tables);
+
+        const [columns] = await pool.query("SHOW COLUMNS FROM users");
+        console.log(
+          "Users columns:",
+          columns.map((c) => c.Field),
+        );
       } finally {
         conn.release();
       }
@@ -165,18 +165,17 @@ async function runMigrations(conn) {
   ];
 
   for (const col of columnsToAdd) {
-    try {
-      const [rows] = await conn.query(`SHOW COLUMNS FROM users LIKE ?`, [
-        col.name,
-      ]);
-      if (rows.length === 0) {
-        console.log(`Migration: Adding column ${col.name} to users table...`);
-        await conn.query(
-          `ALTER TABLE users ADD COLUMN \`${col.name}\` ${col.definition}`,
-        );
-      }
-    } catch (err) {
-      console.error(`Migration failed for column ${col.name}:`, err);
+    const [rows] = await conn.query("SHOW COLUMNS FROM users LIKE ?", [
+      col.name,
+    ]);
+
+    if (rows.length === 0) {
+      console.log(`Adding ${col.name}`);
+      await conn.query(
+        `ALTER TABLE users ADD COLUMN \`${col.name}\` ${col.definition}`,
+      );
+    } else {
+      console.log(`${col.name} already exists`);
     }
   }
 
