@@ -23,10 +23,7 @@ async function startServer() {
     await initDatabase();
 
     // Start Express Server
-    app.listen(PORT, () => {
-      console.log(`Server running on port ${PORT}`);
-      console.log(`Environment: ${process.env.NODE_ENV || "development"}`);
-    });
+    app.listen(PORT, () => {});
   } catch (error) {
     console.error("Failed to start server:", error);
     process.exit(1);

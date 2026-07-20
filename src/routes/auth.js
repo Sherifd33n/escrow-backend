@@ -141,7 +141,9 @@ router.post("/signup", async (req, res, next) => {
         email: true,
         sms: true,
         push: true,
-      }).catch((err) => console.error("Failed to trigger OTP Sent notification:", err));
+      }).catch((err) =>
+        console.error("Failed to trigger OTP Sent notification:", err),
+      );
 
       // Return details needed by frontend to verify OTP
       res.status(201).json({
@@ -227,7 +229,9 @@ router.post("/login", async (req, res, next) => {
         email: true,
         sms: true,
         push: true,
-      }).catch((err) => console.error("Failed to trigger OTP Sent notification:", err));
+      }).catch((err) =>
+        console.error("Failed to trigger OTP Sent notification:", err),
+      );
 
       return res.status(403).json({
         error: "Please verify your email address. OTP has been sent.",
@@ -263,7 +267,9 @@ router.post("/login", async (req, res, next) => {
       email: true,
       sms: true,
       push: true,
-    }).catch((err) => console.error("Failed to trigger Security Alert notification:", err));
+    }).catch((err) =>
+      console.error("Failed to trigger Security Alert notification:", err),
+    );
 
     // Generate JWT token including `jti` claim
     const token = jwt.sign(
@@ -308,10 +314,16 @@ router.post("/verify-otp", async (req, res, next) => {
       .json({ error: "Please provide user ID and verification code." });
   }
 
-  try {
-    // Find valid OTP
+  try {    // Find the matching OTP
     const otps = await db.query(
-      "SELECT * FROM otp_codes WHERE user_id = ? AND code = ? AND used = 0 AND expires_at > NOW() ORDER BY created_at DESC LIMIT 1",
+      `SELECT *
+     FROM otp_codes
+     WHERE user_id = ?
+       AND code = ?
+       AND used = 0
+       AND expires_at > NOW()
+     ORDER BY created_at DESC
+     LIMIT 1`,
       [userId, code],
     );
 
@@ -328,10 +340,8 @@ router.post("/verify-otp", async (req, res, next) => {
     try {
       await conn.beginTransaction();
 
-      // Mark OTP as used
       await conn.query("UPDATE otp_codes SET used = 1 WHERE id = ?", [otp.id]);
 
-      // If verifying for signup, mark user verified
       if (otp.type === "signup") {
         await conn.query("UPDATE users SET is_verified = 1 WHERE id = ?", [
           userId,
@@ -360,7 +370,9 @@ router.post("/verify-otp", async (req, res, next) => {
         email: true,
         sms: true,
         push: true,
-      }).catch((err) => console.error("Failed to trigger Welcome notification:", err));
+      }).catch((err) =>
+        console.error("Failed to trigger Welcome notification:", err),
+      );
     }
 
     if (!user) {
@@ -396,7 +408,9 @@ router.post("/verify-otp", async (req, res, next) => {
       email: true,
       sms: true,
       push: true,
-    }).catch((err) => console.error("Failed to trigger Security Alert notification:", err));
+    }).catch((err) =>
+      console.error("Failed to trigger Security Alert notification:", err),
+    );
 
     // Generate JWT token including `jti` claim
     const token = jwt.sign(
@@ -480,7 +494,9 @@ router.post("/resend-otp", async (req, res, next) => {
       email: true,
       sms: true,
       push: true,
-    }).catch((err) => console.error("Failed to trigger OTP Sent notification:", err));
+    }).catch((err) =>
+      console.error("Failed to trigger OTP Sent notification:", err),
+    );
 
     res.json({ message: "A new verification code has been sent." });
   } catch (error) {
@@ -547,7 +563,9 @@ router.post("/forgot-password", async (req, res, next) => {
       email: true,
       sms: true,
       push: true,
-    }).catch((err) => console.error("Failed to trigger Password Reset notification:", err));
+    }).catch((err) =>
+      console.error("Failed to trigger Password Reset notification:", err),
+    );
 
     res.json({ message: "If the email exists, a reset link has been sent." });
   } catch (error) {
@@ -623,7 +641,9 @@ router.post("/reset-password", async (req, res, next) => {
       email: true,
       sms: true,
       push: true,
-    }).catch((err) => console.error("Failed to trigger Security Alert notification:", err));
+    }).catch((err) =>
+      console.error("Failed to trigger Security Alert notification:", err),
+    );
 
     res.json({ message: "Password has been reset successfully." });
   } catch (error) {

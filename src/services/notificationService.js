@@ -24,15 +24,17 @@
  *    comment below with zero changes to callers.
  */
 
-import db                                   from "../config/db.js";
-import { NOTIFICATION_CHANNEL }             from "../constants/notificationTypes.js";
-import { buildInAppContent,
-         buildEmailContent,
-         buildSmsContent }                  from "./notificationTemplates.js";
-import { sendNotificationEmail }            from "./emailService.js";
-import { sendNotificationSMS }              from "./smsService.js";
-import { sendPushNotification }             from "./pushService.js";
-import { getUserNotificationPreferences }   from "./notificationPreferenceService.js";
+import db from "../config/db.js";
+import { NOTIFICATION_CHANNEL } from "../constants/notificationTypes.js";
+import {
+  buildInAppContent,
+  buildEmailContent,
+  buildSmsContent,
+} from "./notificationTemplates.js";
+import { sendNotificationEmail } from "./emailService.js";
+import { sendNotificationSMS } from "./smsService.js";
+import { sendPushNotification } from "./pushService.js";
+import { getUserNotificationPreferences } from "./notificationPreferenceService.js";
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -49,7 +51,20 @@ import { getUserNotificationPreferences }   from "./notificationPreferenceServic
  * @param {object}  [opts.metadata]
  * @returns {Promise<number>} insertId of the new row.
  */
-async function persistNotification({ userId, type, title, message, channel, metadata }) {
+async function persistNotification({
+  userId,
+  type,
+  title,
+  message,
+  channel,
+  metadata,
+}) {
+  const users = await db.query("SELECT id, email FROM users WHERE id = ?", [
+    userId,
+  ]);
+
+  console.log("Notification sees user:", users);
+
   const [result] = await db.getPool().query(
     `INSERT INTO notifications
        (user_id, type, title, message, channel, metadata)
@@ -63,9 +78,9 @@ async function persistNotification({ userId, type, title, message, channel, meta
       metadata ? JSON.stringify(metadata) : null,
     ],
   );
+
   return result.insertId;
 }
-
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -86,10 +101,10 @@ async function persistNotification({ userId, type, title, message, channel, meta
 export async function notify({
   userId,
   type,
-  data    = {},
-  email   = false,
-  sms     = false,
-  push    = false,
+  data = {},
+  email = false,
+  sms = false,
+  push = false,
   metadata,
 }) {
   // 1. Build in-app content from the template.
@@ -102,7 +117,7 @@ export async function notify({
     type,
     title,
     message,
-    channel:  NOTIFICATION_CHANNEL.IN_APP,
+    channel: NOTIFICATION_CHANNEL.IN_APP,
     metadata,
   });
 
@@ -118,13 +133,16 @@ export async function notify({
   try {
     prefs = await getUserNotificationPreferences(userId);
   } catch (err) {
-    console.error("[notificationService] Failed to load user prefs:", err.message);
+    console.error(
+      "[notificationService] Failed to load user prefs:",
+      err.message,
+    );
   }
 
   // 4. Fetch user contact details for email/SMS (only if needed).
   let userEmail = null;
   let userPhone = null;
-  let userName  = null;
+  let userName = null;
 
   if ((email && prefs.email) || (sms && prefs.sms)) {
     try {
@@ -135,10 +153,13 @@ export async function notify({
       if (users.length) {
         userEmail = users[0].email;
         userPhone = users[0].phone;
-        userName  = users[0].name;
+        userName = users[0].name;
       }
     } catch (err) {
-      console.error("[notificationService] Failed to load user contact info:", err.message);
+      console.error(
+        "[notificationService] Failed to load user contact info:",
+        err.message,
+      );
     }
   }
 
@@ -150,10 +171,16 @@ export async function notify({
     const emailContent = buildEmailContent(type, tplData);
     if (emailContent) {
       // Fire-and-forget — don't await or let failures surface to the caller.
-      sendNotificationEmail(userEmail, emailContent.subject, emailContent.html)
-        .catch((err) =>
-          console.error("[notificationService] Email dispatch error:", err.message),
-        );
+      sendNotificationEmail(
+        userEmail,
+        emailContent.subject,
+        emailContent.html,
+      ).catch((err) =>
+        console.error(
+          "[notificationService] Email dispatch error:",
+          err.message,
+        ),
+      );
     }
   }
 
@@ -171,7 +198,10 @@ export async function notify({
   if (push && prefs.push) {
     sendPushNotification({ userId, title, message, data: tplData }).catch(
       (err) =>
-        console.error("[notificationService] Push dispatch error:", err.message),
+        console.error(
+          "[notificationService] Push dispatch error:",
+          err.message,
+        ),
     );
   }
 

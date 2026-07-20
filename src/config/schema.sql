@@ -1,5 +1,4 @@
 CREATE DATABASE IF NOT EXISTS `escrow_db` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-USE `escrow_db`;
 
 -- Users table
 CREATE TABLE IF NOT EXISTS `users` (

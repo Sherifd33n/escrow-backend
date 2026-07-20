@@ -53,18 +53,6 @@ export async function initDatabase() {
 
         // Run migration to add columns if they are missing
         await runMigrations(conn);
-
-        const [db] = await pool.query("SELECT DATABASE() AS db");
-        console.log("Connected database:", db[0].db);
-
-        const [tables] = await pool.query("SHOW TABLES");
-        console.log("Tables:", tables);
-
-        const [columns] = await pool.query("SHOW COLUMNS FROM users");
-        console.log(
-          "Users columns:",
-          columns.map((c) => c.Field),
-        );
       } finally {
         conn.release();
       }
@@ -170,12 +158,10 @@ async function runMigrations(conn) {
     ]);
 
     if (rows.length === 0) {
-      console.log(`Adding ${col.name}`);
+      console.log(`Migration: Added users.${col.name}`);
       await conn.query(
         `ALTER TABLE users ADD COLUMN \`${col.name}\` ${col.definition}`,
       );
-    } else {
-      console.log(`${col.name} already exists`);
     }
   }
 
@@ -360,6 +346,7 @@ export async function query(sql, params) {
   if (!pool) {
     throw new Error("Database pool not initialized. Call initDatabase first.");
   }
+
   const [results] = await pool.query(sql, params);
   return results;
 }
