@@ -7,14 +7,26 @@ let transporter;
 
 // Create SMTP transporter
 if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
+  console.log("SMTP_HOST:", process.env.SMTP_HOST);
+  console.log("SMTP_PORT:", process.env.SMTP_PORT);
+  console.log("SMTP_SECURE:", process.env.SMTP_SECURE);
+
   transporter = nodemailer.createTransport({
     host: process.env.SMTP_HOST,
-    port: Number(process.env.SMTP_PORT || 587),
+    port: Number(process.env.SMTP_PORT),
     secure: process.env.SMTP_SECURE === "true",
+
     auth: {
       user: process.env.SMTP_USER,
       pass: process.env.SMTP_PASS,
     },
+
+    connectionTimeout: 15000,
+    greetingTimeout: 15000,
+    socketTimeout: 15000,
+
+    logger: true,
+    debug: true,
   });
 
   // Verify SMTP connection once when the server starts
@@ -208,7 +220,11 @@ color:#999;
   }
 }
 
-export async function sendPasswordResetLink(email, resetLink, expiryMinutes = 30) {
+export async function sendPasswordResetLink(
+  email,
+  resetLink,
+  expiryMinutes = 30,
+) {
   if (!process.env.SMTP_FROM) {
     throw new Error("SMTP_FROM is missing from the environment variables.");
   }
