@@ -78,11 +78,17 @@ const TRANSACTION_TRANSITION_ROLES = {
     ROLE.SELLER,
   ],
 
-  // Buyer reviews the deliverable
+  // Buyer reviews & approves deliverable
   [`${TRANSACTION_STATUS.INSPECTION}:${TRANSACTION_STATUS.AUDIT}`]: [
     ROLE.BUYER,
   ],
   [`${TRANSACTION_STATUS.INSPECTION}:${TRANSACTION_STATUS.REVISION}`]: [
+    ROLE.BUYER,
+  ],
+  [`${TRANSACTION_STATUS.INSPECTION}:${TRANSACTION_STATUS.APPROVED}`]: [
+    ROLE.BUYER,
+  ],
+  [`${TRANSACTION_STATUS.INSPECTION}:${TRANSACTION_STATUS.COMPLETED}`]: [
     ROLE.BUYER,
   ],
   [`${TRANSACTION_STATUS.INSPECTION}:${TRANSACTION_STATUS.DISPUTED}`]: [
@@ -94,6 +100,12 @@ const TRANSACTION_TRANSITION_ROLES = {
   [`${TRANSACTION_STATUS.REVISION}:${TRANSACTION_STATUS.INPROGRESS}`]: [
     ROLE.SELLER,
   ],
+  [`${TRANSACTION_STATUS.REVISION}:${TRANSACTION_STATUS.APPROVED}`]: [
+    ROLE.BUYER,
+  ],
+  [`${TRANSACTION_STATUS.REVISION}:${TRANSACTION_STATUS.COMPLETED}`]: [
+    ROLE.BUYER,
+  ],
   [`${TRANSACTION_STATUS.REVISION}:${TRANSACTION_STATUS.DISPUTED}`]: [
     ROLE.BUYER,
     ROLE.SELLER,
@@ -101,6 +113,7 @@ const TRANSACTION_TRANSITION_ROLES = {
 
   // Audit / approval
   [`${TRANSACTION_STATUS.AUDIT}:${TRANSACTION_STATUS.APPROVED}`]: [ROLE.BUYER],
+  [`${TRANSACTION_STATUS.AUDIT}:${TRANSACTION_STATUS.COMPLETED}`]: [ROLE.BUYER],
   [`${TRANSACTION_STATUS.AUDIT}:${TRANSACTION_STATUS.DISPUTED}`]: [
     ROLE.BUYER,
     ROLE.SELLER,
@@ -108,6 +121,18 @@ const TRANSACTION_TRANSITION_ROLES = {
 
   // Buyer releases funds
   [`${TRANSACTION_STATUS.APPROVED}:${TRANSACTION_STATUS.COMPLETED}`]: [
+    ROLE.BUYER,
+  ],
+  [`${TRANSACTION_STATUS.FUNDED}:${TRANSACTION_STATUS.APPROVED}`]: [
+    ROLE.BUYER,
+  ],
+  [`${TRANSACTION_STATUS.FUNDED}:${TRANSACTION_STATUS.COMPLETED}`]: [
+    ROLE.BUYER,
+  ],
+  [`${TRANSACTION_STATUS.INPROGRESS}:${TRANSACTION_STATUS.APPROVED}`]: [
+    ROLE.BUYER,
+  ],
+  [`${TRANSACTION_STATUS.INPROGRESS}:${TRANSACTION_STATUS.COMPLETED}`]: [
     ROLE.BUYER,
   ],
 };
@@ -123,10 +148,14 @@ const MANUAL_MILESTONE_STATUSES = [
 
 const ALLOWED_MILESTONE_TRANSITIONS = {
   [MILESTONE_STATUS.DUE]: [MILESTONE_STATUS.SUBMITTED],
+  [MILESTONE_STATUS.PAID]: [MILESTONE_STATUS.SUBMITTED],
+  [MILESTONE_STATUS.PENDING]: [MILESTONE_STATUS.SUBMITTED],
+  [MILESTONE_STATUS.UPCOMING]: [MILESTONE_STATUS.SUBMITTED],
   [MILESTONE_STATUS.SUBMITTED]: [
     MILESTONE_STATUS.APPROVED,
     MILESTONE_STATUS.REJECTED,
   ],
+  [MILESTONE_STATUS.REJECTED]: [MILESTONE_STATUS.SUBMITTED],
 };
 
 const MAX_DELIVERABLE_NOTE_LENGTH = 5000;
@@ -174,13 +203,18 @@ function parseReviewDays(raw) {
 }
 
 async function resolveTransactionId(paramId) {
-  if (!isNaN(Number(paramId))) {
-    return Number(paramId);
+  if (!paramId) return null;
+  const numId = Number(paramId);
+  if (!isNaN(numId)) {
+    const txRows = await db.query("SELECT id FROM transactions WHERE id = ?", [numId]);
+    if (txRows.length) return txRows[0].id;
+
+    const dRows = await db.query("SELECT transaction_id FROM disputes WHERE id = ?", [numId]);
+    if (dRows.length) return dRows[0].transaction_id;
+
+    return null;
   }
-  const rows = await db.query(
-    "SELECT id FROM transactions WHERE txn_code = ?",
-    [paramId],
-  );
+  const rows = await db.query("SELECT id FROM transactions WHERE txn_code = ?", [paramId]);
   return rows.length ? rows[0].id : null;
 }
 
@@ -427,7 +461,7 @@ router.post("/", async (req, res, next) => {
           transactionId,
           `Milestone ${i} of ${count}`,
           currentAmount,
-          i === 1 ? MILESTONE_STATUS.DUE : MILESTONE_STATUS.PENDING,
+          i === 1 ? MILESTONE_STATUS.UPCOMING : MILESTONE_STATUS.PENDING,
         ],
       );
     }
@@ -702,41 +736,76 @@ router.patch("/:id/status", async (req, res, next) => {
     );
     const currentTx = refreshedTxs[0];
 
-    // If status becomes completed, simulate payout from buyer to seller
+    // If status becomes APPROVED or COMPLETED, release escrow funds to seller's wallet balance
     if (
-      nextStatus === TRANSACTION_STATUS.COMPLETED &&
+      [TRANSACTION_STATUS.APPROVED, TRANSACTION_STATUS.COMPLETED].includes(nextStatus) &&
       previousStatus !== TRANSACTION_STATUS.COMPLETED
     ) {
-      const releaseAmount = parseFloat(currentTx.escrow_balance || 0);
+      // Fetch milestones associated with transaction FOR UPDATE
+      const [allMilestones] = await conn.query(
+        "SELECT * FROM milestones WHERE transaction_id = ? ORDER BY id ASC FOR UPDATE",
+        [currentTx.id],
+      );
 
-      if (releaseAmount <= 0) {
+      // Verify all milestones are completely paid into escrow before release can proceed
+      const hasUnpaidMilestones = allMilestones.some(
+        (m) =>
+          m.status === MILESTONE_STATUS.PENDING ||
+          m.status === MILESTONE_STATUS.UPCOMING ||
+          m.status === MILESTONE_STATUS.DUE,
+      );
+
+      const totalEscrowFunded =
+        parseFloat(currentTx.escrow_balance || 0) +
+        parseFloat(currentTx.released_amount || 0);
+      const totalTransactionAmount = parseFloat(currentTx.amount || 0);
+
+      const allPaidIntoEscrow =
+        !hasUnpaidMilestones &&
+        (totalTransactionAmount <= 0 || totalEscrowFunded >= totalTransactionAmount - 0.01);
+
+      if (!allPaidIntoEscrow) {
         return rollbackWithError(
           conn,
           res,
           400,
-          "There are no escrow funds available for release.",
+          "Accept & Release can only be completed when all milestones are fully paid into escrow.",
         );
       }
 
-      const { wallet } = await releaseEscrow({
-        conn,
-        transaction: currentTx,
-        recipientId: currentTx.seller_id,
-        amount: releaseAmount,
-      });
+      const totalReleaseAmount = parseFloat(currentTx.escrow_balance || 0);
 
-      await logTransactionEvent({
-        conn,
-        transactionId: currentTx.id,
-        userId,
-        action: "escrow_released",
-        note: `Released ${releaseAmount} to seller`,
-        metadata: {
-          sellerId: currentTx.seller_id,
-          walletId: wallet.id,
-          amount: releaseAmount,
-        },
-      });
+      if (totalReleaseAmount > 0) {
+        const { wallet } = await releaseEscrow({
+          conn,
+          transaction: currentTx,
+          recipientId: currentTx.seller_id,
+          amount: totalReleaseAmount,
+        });
+
+        await logTransactionEvent({
+          conn,
+          transactionId: currentTx.id,
+          userId,
+          action: "full_escrow_released",
+          note: `Released total escrow balance (${totalReleaseAmount}) to seller balance`,
+          metadata: {
+            sellerId: currentTx.seller_id,
+            walletId: wallet.id,
+            amount: totalReleaseAmount,
+          },
+        });
+      }
+
+      await conn.query("UPDATE milestones SET status = ? WHERE transaction_id = ?", [
+        MILESTONE_STATUS.APPROVED,
+        currentTx.id,
+      ]);
+
+      await conn.query("UPDATE transactions SET status = ? WHERE id = ?", [
+        TRANSACTION_STATUS.COMPLETED,
+        currentTx.id,
+      ]);
     }
 
     await conn.commit();
@@ -1054,7 +1123,7 @@ router.patch("/milestones/:id/status", async (req, res, next) => {
     // practice the transition table above already blocks re-submission
     // since "submitted" only reaches here from "due", but this guards
     // against that invariant changing later.)
-    if (status === MILESTONE_STATUS.SUBMITTED && milestone.deliverable_note) {
+    if (status === MILESTONE_STATUS.SUBMITTED && milestone.deliverable_note && milestone.status !== MILESTONE_STATUS.REJECTED) {
       return rollbackWithError(
         conn,
         res,
@@ -1139,6 +1208,95 @@ router.patch("/milestones/:id/status", async (req, res, next) => {
       });
     }
 
+    let sellerWalletResult = null;
+    let autoCompletedTransaction = false;
+
+    if (status === MILESTONE_STATUS.APPROVED) {
+      // Fetch all milestones for this transaction to verify full funding
+      const [allMilestones] = await conn.query(
+        "SELECT * FROM milestones WHERE transaction_id = ? ORDER BY id ASC FOR UPDATE",
+        [tx.id],
+      );
+
+      // Verify all milestones are completely paid into escrow before release can proceed
+      const hasUnpaidMilestones = allMilestones.some(
+        (m) =>
+          m.status === MILESTONE_STATUS.PENDING ||
+          m.status === MILESTONE_STATUS.UPCOMING ||
+          m.status === MILESTONE_STATUS.DUE,
+      );
+
+      const totalEscrowFunded =
+        parseFloat(tx.escrow_balance || 0) + parseFloat(tx.released_amount || 0);
+      const totalTransactionAmount = parseFloat(tx.amount || 0);
+
+      const allPaidIntoEscrow =
+        !hasUnpaidMilestones &&
+        (totalTransactionAmount <= 0 || totalEscrowFunded >= totalTransactionAmount - 0.01);
+
+      if (!allPaidIntoEscrow) {
+        return rollbackWithError(
+          conn,
+          res,
+          400,
+          "Accept & Release can only be completed when all milestones are fully paid into escrow.",
+        );
+      }
+
+      const totalReleaseAmount = parseFloat(tx.escrow_balance || 0);
+
+      if (totalReleaseAmount > 0) {
+        sellerWalletResult = await releaseEscrow({
+          conn,
+          transaction: tx,
+          recipientId: tx.seller_id,
+          amount: totalReleaseAmount,
+        });
+
+        await logTransactionEvent({
+          conn,
+          transactionId: tx.id,
+          userId,
+          action: "full_escrow_released",
+          note: `Released total escrow balance (${totalReleaseAmount}) to provider available balance`,
+          metadata: {
+            sellerId: tx.seller_id,
+            amount: totalReleaseAmount,
+            walletId: sellerWalletResult.wallet.id,
+          },
+        });
+      }
+
+      // Mark all milestones as approved
+      await conn.query("UPDATE milestones SET status = ? WHERE transaction_id = ?", [
+        MILESTONE_STATUS.APPROVED,
+        tx.id,
+      ]);
+
+      // Complete transaction status
+      if (tx.status !== TRANSACTION_STATUS.COMPLETED) {
+        await updateTransactionStatus({
+          conn,
+          transaction: tx,
+          userId,
+          nextStatus: TRANSACTION_STATUS.COMPLETED,
+          action: "all_milestones_completed",
+        });
+
+        await logTransactionEvent({
+          conn,
+          transactionId: tx.id,
+          userId,
+          action: "transaction_completed",
+          fromStatus: tx.status,
+          toStatus: TRANSACTION_STATUS.COMPLETED,
+          note: "All escrow funds released. Transaction marked as completed.",
+        });
+
+        autoCompletedTransaction = true;
+      }
+    }
+
     await conn.commit();
 
     // Send notifications after commit
@@ -1167,6 +1325,40 @@ router.patch("/milestones/:id/status", async (req, res, next) => {
         sms: true,
         push: true,
       }).catch((err) => console.error("Notification dispatch error:", err));
+
+      if (sellerWalletResult) {
+        notify({
+          userId: tx.seller_id,
+          type: NOTIFICATION_TYPE.WALLET_FUNDED,
+          data: {
+            amount: parseFloat(milestone.amount).toFixed(2),
+            balance: sellerWalletResult.balance.toFixed(2),
+          },
+          email: true,
+          sms: true,
+          push: true,
+        }).catch((err) => console.error("Notification dispatch error:", err));
+      }
+
+      if (autoCompletedTransaction) {
+        notify({
+          userId: tx.buyer_id,
+          type: NOTIFICATION_TYPE.TRANSACTION_COMPLETED,
+          data: { transaction: tx.title },
+          email: true,
+          sms: true,
+          push: true,
+        }).catch((err) => console.error("Notification dispatch error:", err));
+
+        notify({
+          userId: tx.seller_id,
+          type: NOTIFICATION_TYPE.TRANSACTION_COMPLETED,
+          data: { transaction: tx.title },
+          email: true,
+          sms: true,
+          push: true,
+        }).catch((err) => console.error("Notification dispatch error:", err));
+      }
     } else if (status === MILESTONE_STATUS.REJECTED) {
       notify({
         userId: tx.seller_id,
@@ -1253,12 +1445,12 @@ router.post("/milestones/:id/pay", async (req, res, next) => {
     }
 
     // 4. Verify status is not already paid
-    if (milestone.status !== MILESTONE_STATUS.DUE) {
+    if ([MILESTONE_STATUS.PAID, MILESTONE_STATUS.APPROVED].includes(milestone.status)) {
       return rollbackWithError(
         conn,
         res,
         400,
-        `Only milestones in "due" status can be paid. Current status: ${milestone.status}`,
+        `Milestone is already paid or approved. Current status: ${milestone.status}`,
       );
     }
 
@@ -1351,7 +1543,7 @@ router.post("/milestones/:id/pay", async (req, res, next) => {
         nextMilestone.status === MILESTONE_STATUS.UPCOMING
       ) {
         await conn.query("UPDATE milestones SET status = ? WHERE id = ?", [
-          MILESTONE_STATUS.DUE,
+          MILESTONE_STATUS.UPCOMING,
           nextMilestone.id,
         ]);
 
@@ -1692,13 +1884,13 @@ router.patch("/:id/dispute/resolve", async (req, res, next) => {
   const adminId = req.user.id;
 
   // ── 1. Admin guard ─────────────────────────────────────────────────────────
-  if (req.user.role !== "admin") {
+  if ((req.user.role || "").toLowerCase() !== "admin") {
     return res.status(403).json({
       error: "Access denied. Only admins can resolve disputes.",
     });
   }
 
-  // ── 2. Body validation (fail fast before opening a DB transaction) ─────────
+  // ── 2. Body validation ─────────────────────────────────────────────────────
   if (!resolution || !String(resolution).trim()) {
     return res.status(400).json({ error: "Resolution text is required." });
   }
@@ -1710,13 +1902,12 @@ router.patch("/:id/dispute/resolve", async (req, res, next) => {
   }
 
   const cleanResolution = String(resolution).trim();
-
   const conn = await db.getPool().getConnection();
 
   try {
     await conn.beginTransaction();
 
-    // ── 3. Resolve transaction id (numeric id or txn_code) ──────────────────
+    // ── 3. Resolve transaction id (numeric id or txn_code or dispute id) ─────
     const transactionId = await resolveTransactionId(paramId);
     if (transactionId === null) {
       return rollbackWithError(conn, res, 404, "Transaction not found.");
@@ -1734,26 +1925,24 @@ router.patch("/:id/dispute/resolve", async (req, res, next) => {
 
     const transaction = transactions[0];
 
-    // ── 5. Verify transaction is currently DISPUTED ──────────────────────────
-    if (transaction.status !== TRANSACTION_STATUS.DISPUTED) {
+    if (["completed", "cancelled"].includes(transaction.status)) {
       return rollbackWithError(
         conn,
         res,
         400,
-        `Transaction is not in disputed status. Current status: "${transaction.status}".`,
+        `Transaction is already ${transaction.status}.`,
       );
     }
 
-    // ── 6. Lock dispute row FOR UPDATE ───────────────────────────────────────
+    // ── 5. Lock dispute row FOR UPDATE ───────────────────────────────────────
     const [disputes] = await conn.query(
       `SELECT *
        FROM disputes
-       WHERE transaction_id = ?
-         AND status IN (?, ?)
+       WHERE transaction_id = ? OR id = ?
        ORDER BY created_at DESC
        LIMIT 1
        FOR UPDATE`,
-      [transaction.id, DISPUTE_STATUS.FILED, DISPUTE_STATUS.UNDER_REVIEW],
+      [transaction.id, paramId],
     );
 
     if (!disputes.length) {
@@ -1761,16 +1950,14 @@ router.patch("/:id/dispute/resolve", async (req, res, next) => {
         conn,
         res,
         404,
-        "No active dispute found for this transaction.",
+        "No dispute found for this transaction.",
       );
     }
 
     const dispute = disputes[0];
 
-    // ── 7. Prevent double-resolve ────────────────────────────────────────────
-    //  (The query above already filters to filed/under_review, but this guard
-    //   makes the rejection reason explicit for the caller.)
-    if (dispute.status === DISPUTE_STATUS.RESOLVED) {
+    // ── 6. Prevent double-resolve ────────────────────────────────────────────
+    if (dispute.status === DISPUTE_STATUS.RESOLVED || dispute.status === "resolved") {
       return rollbackWithError(
         conn,
         res,
@@ -1779,7 +1966,7 @@ router.patch("/:id/dispute/resolve", async (req, res, next) => {
       );
     }
 
-    // ── 8. Validate escrow balance ───────────────────────────────────────────
+    // ── 7. Validate escrow balance ───────────────────────────────────────────
     const escrowAmount = Number(transaction.escrow_balance);
     if (escrowAmount <= 0) {
       return rollbackWithError(
@@ -1790,7 +1977,7 @@ router.patch("/:id/dispute/resolve", async (req, res, next) => {
       );
     }
 
-    // ── 9. Move funds based on winner ────────────────────────────────────────
+    // ── 8. Move funds based on winner ────────────────────────────────────────
     let wallet;
 
     if (winner === "seller") {
@@ -1808,11 +1995,11 @@ router.patch("/:id/dispute/resolve", async (req, res, next) => {
         transactionId: transaction.id,
         userId: adminId,
         action: "escrow_released",
-        note: `Escrow of ${escrowAmount} released to seller (dispute resolved).`,
+        note: `Escrow of $${escrowAmount} released to seller (dispute resolved).`,
         metadata: {
           disputeId: dispute.id,
           sellerId: transaction.seller_id,
-          walletId: wallet.id,
+          walletId: wallet ? wallet.id : null,
           amount: escrowAmount,
         },
       });
@@ -1831,17 +2018,17 @@ router.patch("/:id/dispute/resolve", async (req, res, next) => {
         transactionId: transaction.id,
         userId: adminId,
         action: "escrow_refunded",
-        note: `Escrow of ${escrowAmount} refunded to buyer (dispute resolved).`,
+        note: `Escrow of $${escrowAmount} refunded to buyer (dispute resolved).`,
         metadata: {
           disputeId: dispute.id,
           buyerId: transaction.buyer_id,
-          walletId: wallet.id,
+          walletId: wallet ? wallet.id : null,
           amount: escrowAmount,
         },
       });
     }
 
-    // ── 10. Update dispute → resolved ────────────────────────────────────────
+    // ── 9. Update dispute → resolved ─────────────────────────────────────────
     await conn.query(
       `UPDATE disputes
        SET status     = ?,
@@ -1851,30 +2038,33 @@ router.patch("/:id/dispute/resolve", async (req, res, next) => {
       [DISPUTE_STATUS.RESOLVED, cleanResolution, dispute.id],
     );
 
-    // ── 11. Update transaction status → COMPLETED via the central service ────
-    //  Both paths (buyer wins / seller wins) close the escrow as COMPLETED.
-    //  The state machine allows DISPUTED → COMPLETED.
-    await updateTransactionStatus({
-      conn,
-      transaction,
-      userId: adminId,
-      nextStatus: TRANSACTION_STATUS.COMPLETED,
-    });
+    // Update milestones to reflect outcome
+    if (winner === "seller") {
+      await conn.query("UPDATE milestones SET status = 'approved' WHERE transaction_id = ?", [transaction.id]);
+    } else {
+      await conn.query("UPDATE milestones SET status = 'rejected' WHERE transaction_id = ?", [transaction.id]);
+    }
 
-    // ── 12. Log admin decision event ─────────────────────────────────────────
+    // ── 10. Update transaction status → COMPLETED ─────────────────────────────
+    await conn.query(
+      "UPDATE transactions SET status = ?, escrow_balance = 0.00 WHERE id = ?",
+      [TRANSACTION_STATUS.COMPLETED, transaction.id]
+    );
+
+    // ── 11. Log admin decision event ─────────────────────────────────────────
     await logTransactionEvent({
       conn,
       transactionId: transaction.id,
       userId: adminId,
       action: "dispute_resolved",
-      fromStatus: TRANSACTION_STATUS.DISPUTED,
+      fromStatus: transaction.status,
       toStatus: TRANSACTION_STATUS.COMPLETED,
       note: cleanResolution,
       metadata: {
         disputeId: dispute.id,
         winner,
         amount: escrowAmount,
-        walletId: wallet.id,
+        walletId: wallet ? wallet.id : null,
         resolvedByAdmin: adminId,
       },
     });
@@ -1913,7 +2103,7 @@ router.patch("/:id/dispute/resolve", async (req, res, next) => {
         type: NOTIFICATION_TYPE.WALLET_FUNDED,
         data: {
           amount: escrowAmount.toFixed(2),
-          balance: balance.toFixed(2),
+          balance: Number(wallet ? wallet.balance : 0).toFixed(2),
         },
         email: true,
         sms: true,

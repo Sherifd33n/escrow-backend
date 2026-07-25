@@ -19,6 +19,10 @@ import db from "../config/db.js";
 import authMiddleware from "../middleware/auth.js";
 import adminOnly from "../middleware/admin.js";
 import { logTransactionEvent } from "../services/transactionEventService.js";
+import { releaseEscrow, refundEscrow } from "../services/walletService.js";
+import { updateTransactionStatus } from "../services/transactionService.js";
+import { notify } from "../services/notificationService.js";
+import { NOTIFICATION_TYPE } from "../constants/notificationTypes.js";
 
 const router = express.Router();
 
@@ -85,10 +89,10 @@ router.get("/dashboard", async (req, res, next) => {
     const tt = terminalTxRows[0] || {};
 
     return res.json({
-      totalEscrow:             parseFloat(escrowRow.total_escrow)               || 0,
-      activeTransactions:      Number(activeTxRow.active_transactions)          || 0,
-      openDisputes:            Number(openDisputeRow.open_disputes)             || 0,
-      pendingKYC:              Number(pendingKycRow.pending_kyc)                || 0,
+      totalEscrow:             parseFloat((escrowRow[0] || {}).total_escrow)        || 0,
+      activeTransactions:      Number((activeTxRow[0] || {}).active_transactions)  || 0,
+      openDisputes:            Number((openDisputeRow[0] || {}).open_disputes)     || 0,
+      pendingKYC:              Number((pendingKycRow[0] || {}).pending_kyc)        || 0,
       totalUsers:              Number(us.total_users)                           || 0,
       totalClients:            Number(us.total_clients)                         || 0,
       totalProviders:          Number(us.total_providers)                       || 0,
@@ -464,7 +468,7 @@ router.get("/disputes/:id", async (req, res, next) => {
       JOIN transactions  t      ON d.transaction_id = t.id
       JOIN users         buyer  ON t.buyer_id        = buyer.id
       JOIN users         seller ON t.seller_id       = seller.id
-      JOIN users         filer  ON d.filed_by        = filer.id
+      LEFT JOIN users    filer  ON d.filed_by        = filer.id
 
       WHERE d.id = ?
       LIMIT 1
@@ -671,6 +675,182 @@ router.patch("/disputes/:id/review", async (req, res, next) => {
       message: "Dispute moved to under_review.",
       disputeId: dispute.id,
       status: "under_review",
+    });
+  } catch (error) {
+    await conn.rollback();
+    next(error);
+  } finally {
+    conn.release();
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PATCH /api/admin/disputes/:id/resolve
+// Resolve a dispute in favour of buyer or seller.
+// ─────────────────────────────────────────────────────────────────────────────
+router.patch("/disputes/:id/resolve", async (req, res, next) => {
+  const disputeId = req.params.id;
+  const { resolution, winner } = req.body;
+  const adminId = req.user.id;
+
+  if (!resolution || !String(resolution).trim()) {
+    return res.status(400).json({ error: "Resolution text is required." });
+  }
+
+  if (!["buyer", "seller"].includes(winner)) {
+    return res.status(400).json({ error: 'Winner must be either "buyer" or "seller".' });
+  }
+
+  const cleanResolution = String(resolution).trim();
+  const conn = await db.getPool().getConnection();
+
+  try {
+    await conn.beginTransaction();
+
+    // Lock dispute row
+    const [disputes] = await conn.query(
+      "SELECT * FROM disputes WHERE id = ? OR transaction_id = ? ORDER BY created_at DESC LIMIT 1 FOR UPDATE",
+      [disputeId, disputeId]
+    );
+
+    if (!disputes.length) {
+      await conn.rollback();
+      return res.status(404).json({ error: "Dispute not found." });
+    }
+
+    const dispute = disputes[0];
+
+    if (dispute.status === "resolved") {
+      await conn.rollback();
+      return res.status(409).json({ error: "Dispute has already been resolved." });
+    }
+
+    // Lock transaction
+    const [transactions] = await conn.query(
+      "SELECT * FROM transactions WHERE id = ? FOR UPDATE",
+      [dispute.transaction_id]
+    );
+
+    if (!transactions.length) {
+      await conn.rollback();
+      return res.status(404).json({ error: "Parent transaction not found." });
+    }
+
+    const transaction = transactions[0];
+    const escrowAmount = Number(transaction.escrow_balance);
+
+    if (escrowAmount <= 0) {
+      await conn.rollback();
+      return res.status(400).json({ error: "Escrow balance is empty — cannot release or refund funds." });
+    }
+
+    let wallet;
+    if (winner === "seller") {
+      const result = await releaseEscrow({
+        conn,
+        transaction,
+        recipientId: transaction.seller_id,
+        amount: escrowAmount,
+      });
+      wallet = result.wallet;
+
+      await logTransactionEvent({
+        conn,
+        transactionId: transaction.id,
+        userId: adminId,
+        action: "escrow_released",
+        note: `Escrow of $${escrowAmount} released to seller (dispute resolved).`,
+        metadata: { disputeId: dispute.id, sellerId: transaction.seller_id, walletId: wallet.id, amount: escrowAmount },
+      });
+    } else {
+      const result = await refundEscrow({
+        conn,
+        transaction,
+        buyerId: transaction.buyer_id,
+        amount: escrowAmount,
+      });
+      wallet = result.wallet;
+
+      await logTransactionEvent({
+        conn,
+        transactionId: transaction.id,
+        userId: adminId,
+        action: "escrow_refunded",
+        note: `Escrow of $${escrowAmount} refunded to buyer (dispute resolved).`,
+        metadata: { disputeId: dispute.id, buyerId: transaction.buyer_id, walletId: wallet.id, amount: escrowAmount },
+      });
+    }
+
+    // Update dispute -> resolved
+    await conn.query(
+      "UPDATE disputes SET status = 'resolved', resolution = ?, updated_at = NOW() WHERE id = ?",
+      [cleanResolution, dispute.id]
+    );
+
+    // Update milestones
+    if (winner === "seller") {
+      await conn.query("UPDATE milestones SET status = 'approved' WHERE transaction_id = ?", [transaction.id]);
+    } else {
+      await conn.query("UPDATE milestones SET status = 'rejected' WHERE transaction_id = ?", [transaction.id]);
+    }
+
+    // Update transaction -> completed
+    await updateTransactionStatus({
+      conn,
+      transaction,
+      userId: adminId,
+      nextStatus: "completed",
+    });
+
+    // Log dispute_resolved
+    await logTransactionEvent({
+      conn,
+      transactionId: transaction.id,
+      userId: adminId,
+      action: "dispute_resolved",
+      fromStatus: "disputed",
+      toStatus: "completed",
+      note: cleanResolution,
+      metadata: { disputeId: dispute.id, winner, amount: escrowAmount, walletId: wallet.id, resolvedByAdmin: adminId },
+    });
+
+    await conn.commit();
+
+    notify({
+      userId: transaction.buyer_id,
+      type: NOTIFICATION_TYPE.DISPUTE_RESOLVED,
+      data: { transaction: transaction.title, resolution: cleanResolution, winner },
+      email: true, sms: true, push: true,
+    }).catch(err => console.error("Notification dispatch error:", err));
+
+    notify({
+      userId: transaction.seller_id,
+      type: NOTIFICATION_TYPE.DISPUTE_RESOLVED,
+      data: { transaction: transaction.title, resolution: cleanResolution, winner },
+      email: true, sms: true, push: true,
+    }).catch(err => console.error("Notification dispatch error:", err));
+
+    if (winner === "seller") {
+      notify({
+        userId: transaction.seller_id,
+        type: NOTIFICATION_TYPE.WALLET_FUNDED,
+        data: { amount: escrowAmount.toFixed(2), balance: Number(wallet.balance).toFixed(2) },
+        email: true, sms: true, push: true,
+      }).catch(err => console.error("Notification dispatch error:", err));
+    } else {
+      notify({
+        userId: transaction.buyer_id,
+        type: NOTIFICATION_TYPE.WALLET_REFUNDED,
+        data: { amount: escrowAmount.toFixed(2), transaction: transaction.title },
+        email: true, sms: true, push: true,
+      }).catch(err => console.error("Notification dispatch error:", err));
+    }
+
+    return res.json({
+      message: "Dispute resolved successfully.",
+      winner,
+      amountTransferred: escrowAmount,
+      newTransactionStatus: "completed",
     });
   } catch (error) {
     await conn.rollback();
