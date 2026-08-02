@@ -7,6 +7,7 @@ import authMiddleware from "../middleware/auth.js";
 import { sendOTPEmail, sendPasswordResetLink } from "../utils/mailer.js";
 import { notify } from "../services/notificationService.js";
 import { NOTIFICATION_TYPE } from "../constants/notificationTypes.js";
+import { getRequestLocation } from "../utils/location.js";
 
 const router = express.Router();
 
@@ -249,7 +250,7 @@ router.post("/login", async (req, res, next) => {
       req.ip ||
       req.socket.remoteAddress ||
       "127.0.0.1";
-    const location = "Lagos, Nigeria"; // default mock location for local testing
+    const location = getRequestLocation(req);
 
     await db.query(
       "INSERT INTO user_sessions (user_id, token_jti, device, ip_address, location) VALUES (?, ?, ?, ?, ?)",
@@ -390,7 +391,7 @@ router.post("/verify-otp", async (req, res, next) => {
       req.ip ||
       req.socket.remoteAddress ||
       "127.0.0.1";
-    const location = "Lagos, Nigeria"; // default mock location for local testing
+    const location = getRequestLocation(req);
 
     await db.query(
       "INSERT INTO user_sessions (user_id, token_jti, device, ip_address, location) VALUES (?, ?, ?, ?, ?)",

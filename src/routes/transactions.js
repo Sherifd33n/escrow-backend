@@ -19,6 +19,7 @@ import {
   releaseEscrow,
   refundEscrow,
 } from "../services/walletService.js";
+import { resolveDispute } from "../services/disputeService.js";
 
 // Apply auth middleware to all routes in this router
 router.use(authMiddleware);
@@ -1879,10 +1880,6 @@ router.get("/:id/dispute", async (req, res, next) => {
 
 // 10. PATCH /:id/dispute/resolve  — Admin only
 router.patch("/:id/dispute/resolve", async (req, res, next) => {
-  const paramId = req.params.id;
-  const { resolution, winner } = req.body;
-  const adminId = req.user.id;
-
   // ── 1. Admin guard ─────────────────────────────────────────────────────────
   if ((req.user.role || "").toLowerCase() !== "admin") {
     return res.status(403).json({
@@ -1890,250 +1887,19 @@ router.patch("/:id/dispute/resolve", async (req, res, next) => {
     });
   }
 
-  // ── 2. Body validation ─────────────────────────────────────────────────────
-  if (!resolution || !String(resolution).trim()) {
-    return res.status(400).json({ error: "Resolution text is required." });
-  }
-
-  if (!["buyer", "seller"].includes(winner)) {
-    return res
-      .status(400)
-      .json({ error: 'Winner must be either "buyer" or "seller".' });
-  }
-
-  const cleanResolution = String(resolution).trim();
-  const conn = await db.getPool().getConnection();
-
   try {
-    await conn.beginTransaction();
-
-    // ── 3. Resolve transaction id (numeric id or txn_code or dispute id) ─────
-    const transactionId = await resolveTransactionId(paramId);
-    if (transactionId === null) {
-      return rollbackWithError(conn, res, 404, "Transaction not found.");
-    }
-
-    // ── 4. Lock transaction row FOR UPDATE ───────────────────────────────────
-    const [transactions] = await conn.query(
-      "SELECT * FROM transactions WHERE id = ? FOR UPDATE",
-      [transactionId],
-    );
-
-    if (!transactions.length) {
-      return rollbackWithError(conn, res, 404, "Transaction not found.");
-    }
-
-    const transaction = transactions[0];
-
-    if (["completed", "cancelled"].includes(transaction.status)) {
-      return rollbackWithError(
-        conn,
-        res,
-        400,
-        `Transaction is already ${transaction.status}.`,
-      );
-    }
-
-    // ── 5. Lock dispute row FOR UPDATE ───────────────────────────────────────
-    const [disputes] = await conn.query(
-      `SELECT *
-       FROM disputes
-       WHERE transaction_id = ? OR id = ?
-       ORDER BY created_at DESC
-       LIMIT 1
-       FOR UPDATE`,
-      [transaction.id, paramId],
-    );
-
-    if (!disputes.length) {
-      return rollbackWithError(
-        conn,
-        res,
-        404,
-        "No dispute found for this transaction.",
-      );
-    }
-
-    const dispute = disputes[0];
-
-    // ── 6. Prevent double-resolve ────────────────────────────────────────────
-    if (dispute.status === DISPUTE_STATUS.RESOLVED || dispute.status === "resolved") {
-      return rollbackWithError(
-        conn,
-        res,
-        409,
-        "This dispute has already been resolved.",
-      );
-    }
-
-    // ── 7. Validate escrow balance ───────────────────────────────────────────
-    const escrowAmount = Number(transaction.escrow_balance);
-    if (escrowAmount <= 0) {
-      return rollbackWithError(
-        conn,
-        res,
-        400,
-        "Escrow balance is empty — cannot release or refund funds.",
-      );
-    }
-
-    // ── 8. Move funds based on winner ────────────────────────────────────────
-    let wallet;
-
-    if (winner === "seller") {
-      // Seller wins → release escrow to seller
-      const result = await releaseEscrow({
-        conn,
-        transaction,
-        recipientId: transaction.seller_id,
-        amount: escrowAmount,
-      });
-      wallet = result.wallet;
-
-      await logTransactionEvent({
-        conn,
-        transactionId: transaction.id,
-        userId: adminId,
-        action: "escrow_released",
-        note: `Escrow of $${escrowAmount} released to seller (dispute resolved).`,
-        metadata: {
-          disputeId: dispute.id,
-          sellerId: transaction.seller_id,
-          walletId: wallet ? wallet.id : null,
-          amount: escrowAmount,
-        },
-      });
-    } else {
-      // Buyer wins → refund escrow to buyer
-      const result = await refundEscrow({
-        conn,
-        transaction,
-        buyerId: transaction.buyer_id,
-        amount: escrowAmount,
-      });
-      wallet = result.wallet;
-
-      await logTransactionEvent({
-        conn,
-        transactionId: transaction.id,
-        userId: adminId,
-        action: "escrow_refunded",
-        note: `Escrow of $${escrowAmount} refunded to buyer (dispute resolved).`,
-        metadata: {
-          disputeId: dispute.id,
-          buyerId: transaction.buyer_id,
-          walletId: wallet ? wallet.id : null,
-          amount: escrowAmount,
-        },
-      });
-    }
-
-    // ── 9. Update dispute → resolved ─────────────────────────────────────────
-    await conn.query(
-      `UPDATE disputes
-       SET status     = ?,
-           resolution = ?,
-           updated_at = NOW()
-       WHERE id = ?`,
-      [DISPUTE_STATUS.RESOLVED, cleanResolution, dispute.id],
-    );
-
-    // Update milestones to reflect outcome
-    if (winner === "seller") {
-      await conn.query("UPDATE milestones SET status = 'approved' WHERE transaction_id = ?", [transaction.id]);
-    } else {
-      await conn.query("UPDATE milestones SET status = 'rejected' WHERE transaction_id = ?", [transaction.id]);
-    }
-
-    // ── 10. Update transaction status → COMPLETED ─────────────────────────────
-    await conn.query(
-      "UPDATE transactions SET status = ?, escrow_balance = 0.00 WHERE id = ?",
-      [TRANSACTION_STATUS.COMPLETED, transaction.id]
-    );
-
-    // ── 11. Log admin decision event ─────────────────────────────────────────
-    await logTransactionEvent({
-      conn,
-      transactionId: transaction.id,
-      userId: adminId,
-      action: "dispute_resolved",
-      fromStatus: transaction.status,
-      toStatus: TRANSACTION_STATUS.COMPLETED,
-      note: cleanResolution,
-      metadata: {
-        disputeId: dispute.id,
-        winner,
-        amount: escrowAmount,
-        walletId: wallet ? wallet.id : null,
-        resolvedByAdmin: adminId,
-      },
+    const result = await resolveDispute({
+      disputeOrTxId: req.params.id,
+      resolution: req.body.resolution,
+      winner: req.body.winner,
+      adminId: req.user.id,
     });
-
-    await conn.commit();
-
-    notify({
-      userId: transaction.buyer_id,
-      type: NOTIFICATION_TYPE.DISPUTE_RESOLVED,
-      data: {
-        transaction: transaction.title,
-        resolution: cleanResolution,
-        winner,
-      },
-      email: true,
-      sms: true,
-      push: true,
-    }).catch((err) => console.error("Notification dispatch error:", err));
-
-    notify({
-      userId: transaction.seller_id,
-      type: NOTIFICATION_TYPE.DISPUTE_RESOLVED,
-      data: {
-        transaction: transaction.title,
-        resolution: cleanResolution,
-        winner,
-      },
-      email: true,
-      sms: true,
-      push: true,
-    }).catch((err) => console.error("Notification dispatch error:", err));
-
-    if (winner === "seller") {
-      notify({
-        userId: transaction.seller_id,
-        type: NOTIFICATION_TYPE.WALLET_FUNDED,
-        data: {
-          amount: escrowAmount.toFixed(2),
-          balance: Number(wallet ? wallet.balance : 0).toFixed(2),
-        },
-        email: true,
-        sms: true,
-        push: true,
-      }).catch((err) => console.error("Notification dispatch error:", err));
-    } else {
-      notify({
-        userId: transaction.buyer_id,
-        type: NOTIFICATION_TYPE.WALLET_REFUNDED,
-        data: {
-          amount: escrowAmount.toFixed(2),
-          transaction: transaction.title,
-        },
-        email: true,
-        sms: true,
-        push: true,
-      }).catch((err) => console.error("Notification dispatch error:", err));
-    }
-
-    return res.json({
-      message: "Dispute resolved successfully.",
-      winner,
-      amountTransferred: escrowAmount,
-      newTransactionStatus: TRANSACTION_STATUS.COMPLETED,
-    });
+    return res.json(result);
   } catch (error) {
-    await conn.rollback();
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({ error: error.message });
+    }
     next(error);
-  } finally {
-    conn.release();
   }
 });
 

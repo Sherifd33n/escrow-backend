@@ -4,6 +4,7 @@ import authMiddleware from "../middleware/auth.js";
 import crypto from "crypto";
 import { notify } from "../services/notificationService.js";
 import { NOTIFICATION_TYPE } from "../constants/notificationTypes.js";
+import { getUsdToNgnRate } from "../services/exchangeRateService.js";
 
 const router = express.Router();
 
@@ -76,7 +77,13 @@ router.post("/deposit", async (req, res, next) => {
 
     const wallet = await getOrCreateWallet(req.user.id, conn, true);
 
-    const NGN_USD_RATE = 1381.215;
+    let NGN_USD_RATE;
+    try {
+      NGN_USD_RATE = await getUsdToNgnRate();
+    } catch (err) {
+      await conn.rollback();
+      return res.status(503).json({ error: "Unable to retrieve current exchange rate. Please try again later." });
+    }
 
     const amountInUSD = parseFloat(amount) / NGN_USD_RATE;
 

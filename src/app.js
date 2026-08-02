@@ -15,12 +15,42 @@ import notificationsRoutes  from "./routes/notifications.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 
+const isDev = process.env.NODE_ENV !== "production";
+
+const devOrigins = [
+  "http://localhost:5173",
+  "http://localhost:5174",
+  "http://127.0.0.1:5173",
+  "http://127.0.0.1:5174",
+];
+
+const prodFrontendUrl = process.env.FRONTEND_URL ? process.env.FRONTEND_URL.replace(/\/$/, "") : null;
+
+if (!isDev && !prodFrontendUrl) {
+  console.warn("[CORS Warning]: FRONTEND_URL environment variable is not defined in production.");
+}
+
+const allowedOrigins = isDev
+  ? devOrigins
+  : (prodFrontendUrl ? [prodFrontendUrl] : []);
+
 // Middleware
 app.use(
   cors({
-    origin: "*", // Allow all origins for local development, can restrict to frontend URL later
+    origin: (origin, callback) => {
+      // Allow requests with no origin (e.g. mobile apps, curl, server-to-server)
+      if (
+        !origin ||
+        allowedOrigins.includes(origin) ||
+        (isDev && (origin.startsWith("http://localhost:") || origin.startsWith("http://127.0.0.1:")))
+      ) {
+        return callback(null, true);
+      }
+      callback(new Error(`CORS policy error: Origin ${origin} is not allowed.`));
+    },
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
+    credentials: true,
   }),
 );
 
