@@ -350,6 +350,31 @@ const TEMPLATES = {
       </p>`),
     smsText: "Escrow: ${{amount}} refunded to your wallet.",
   },
+
+  [NOTIFICATION_TYPE.KYC_APPROVED]: {
+    title:        "Identity Verified",
+    message:      "Your KYC submission has been approved. You now have full access to the platform.",
+    emailSubject: "Your Identity Has Been Verified — Escrow",
+    emailBody: (d) => emailWrap("Identity Verified", `
+      <h2 style="margin-top:0;color:#006c47;">Identity Verification Approved ✓</h2>
+      <p>Hi ${d.name || "there"},</p>
+      <p>Great news! Your KYC submission has been reviewed and <strong>approved</strong>. Your account is now fully verified and you can access all platform features.</p>
+      <p style="color:#75777f;font-size:13px;">If you have any questions, please contact our support team.</p>`),
+    smsText: "Escrow: Your identity verification has been approved. Your account is now fully verified.",
+  },
+
+  [NOTIFICATION_TYPE.KYC_REJECTED]: {
+    title:        "KYC Submission Rejected",
+    message:      "Your KYC submission was rejected. Reason: {{reason}}. You may submit again with clearer documents.",
+    emailSubject: "KYC Submission Update — Action Required",
+    emailBody: (d) => emailWrap("KYC Submission Rejected", `
+      <h2 style="margin-top:0;color:#ba1a1a;">Identity Verification Not Approved</h2>
+      <p>Hi ${d.name || "there"},</p>
+      <p>Unfortunately your KYC submission could not be approved.</p>
+      <p><strong>Reason:</strong> ${d.reason || "Documents were unclear or expired."}</p>
+      <p>Please re-submit with clearer, valid documents. Common issues include blurry images, expired IDs, or mismatched information.</p>`),
+    smsText: "Escrow: Your KYC submission was rejected. Reason: {{reason}}. Please resubmit with valid documents.",
+  },
 };
 
 // ---------------------------------------------------------------------------

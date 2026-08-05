@@ -182,9 +182,12 @@ CREATE TABLE IF NOT EXISTS `kyc_submissions` (
   `incorp_file` VARCHAR(255) DEFAULT NULL,
   `status` ENUM('pending', 'approved', 'rejected') NOT NULL DEFAULT 'pending',
   `rejection_reason` TEXT DEFAULT NULL,
+  `reviewed_by` INT DEFAULT NULL,
+  `reviewed_at` TIMESTAMP NULL DEFAULT NULL,
   `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   `updated_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
+  FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE,
+  FOREIGN KEY (`reviewed_by`) REFERENCES `users` (`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB;
 
 -- Reviews table

@@ -14,6 +14,8 @@ const dbConfig = {
   user: process.env.DB_USER || "root",
   password: process.env.DB_PASSWORD || "",
   multipleStatements: true,
+  enableKeepAlive: true,
+  keepAliveInitialDelay: 10000,
 };
 
 let pool;

@@ -30,6 +30,10 @@ export const NOTIFICATION_TYPE = Object.freeze({
   // Reviews
   REVIEW_RECEIVED: "review_received",
 
+  // KYC
+  KYC_APPROVED: "kyc_approved",
+  KYC_REJECTED: "kyc_rejected",
+
   // Wallet
   WALLET_FUNDED:    "wallet_funded",
   WALLET_WITHDRAWN: "wallet_withdrawn",

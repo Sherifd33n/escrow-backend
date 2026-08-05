@@ -7,6 +7,8 @@ import multer from "multer";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import { notify } from "../services/notificationService.js";
+import { NOTIFICATION_TYPE } from "../constants/notificationTypes.js";
 
 const router = express.Router();
 
@@ -566,24 +568,44 @@ router.post("/kyc/submit", kycUpload, async (req, res, next) => {
 router.get("/kyc/status", async (req, res, next) => {
   const userId = req.user.id;
   try {
+    const userRows = await db.query(
+      "SELECT kyc_tier, is_verified FROM users WHERE id = ?",
+      [userId]
+    );
+    const userRow = userRows[0] || {};
+    const currentTier = userRow.kyc_tier || 1;
+    const isUserVerified = userRow.is_verified === 1 || userRow.is_verified === true || currentTier > 1;
+
     const submissions = await db.query(
       "SELECT id, phone, id_type, id_number, id_file, selfie_file, biz_name, biz_reg, biz_file, incorp_file, status, rejection_reason, created_at FROM kyc_submissions WHERE user_id = ? ORDER BY created_at DESC LIMIT 1",
       [userId],
     );
+
     if (submissions.length === 0) {
-      return res.json({ status: "none", tier: req.user.kyc_tier });
+      return res.json({
+        status: isUserVerified ? "approved" : "none",
+        tier: currentTier,
+      });
     }
+
+    const sub = submissions[0];
+    let effectiveStatus = sub.status;
+    if (isUserVerified || sub.status === "approved") {
+      effectiveStatus = "approved";
+    }
+
     res.json({
-      ...submissions[0],
-      tier: req.user.kyc_tier,
+      ...sub,
+      status: effectiveStatus,
+      tier: currentTier,
     });
   } catch (error) {
     next(error);
   }
 });
 
-// PATCH /kyc - Update current user's KYC tier directly (Demo helper)
-router.patch("/kyc", async (req, res, next) => {
+// PATCH /kyc - Update current user's KYC tier directly (Admin/Demo helper)
+router.patch("/kyc", adminOnly, async (req, res, next) => {
   const { tier } = req.body;
   const userId = req.user.id;
 
@@ -645,6 +667,29 @@ router.patch("/kyc", async (req, res, next) => {
   }
 });
 
+// POST /kyc/reset - Reset current user's KYC submission and status (Testing helper)
+router.post("/kyc/reset", async (req, res, next) => {
+  const userId = req.user.id;
+  const conn = await db.getPool().getConnection();
+  try {
+    await conn.beginTransaction();
+
+    await conn.query("DELETE FROM kyc_submissions WHERE user_id = ?", [userId]);
+    await conn.query(
+      "UPDATE users SET kyc_tier = 1, is_verified = 0 WHERE id = ?",
+      [userId]
+    );
+
+    await conn.commit();
+    res.json({ message: "KYC reset successfully. You can now test identity verification again." });
+  } catch (error) {
+    await conn.rollback();
+    next(error);
+  } finally {
+    conn.release();
+  }
+});
+
 // GET /kyc/queue - Get pending KYC submissions (Admin only)
 router.get("/kyc/queue", adminOnly, async (req, res, next) => {
   try {
@@ -664,15 +709,19 @@ router.get("/kyc/queue", adminOnly, async (req, res, next) => {
 // PATCH /kyc/approve/:id - Approve KYC submission (Admin only)
 router.patch("/kyc/approve/:id", adminOnly, async (req, res, next) => {
   const submissionId = req.params.id;
+  const adminId = req.user.id;
   try {
     const submissions = await db.query(
-      "SELECT * FROM kyc_submissions WHERE id = ?",
+      "SELECT k.*, u.name as user_name FROM kyc_submissions k JOIN users u ON k.user_id = u.id WHERE k.id = ?",
       [submissionId],
     );
     if (submissions.length === 0) {
       return res.status(404).json({ error: "KYC submission not found." });
     }
     const sub = submissions[0];
+    if (sub.status !== "pending") {
+      return res.status(400).json({ error: `Submission is already ${sub.status}.` });
+    }
     const targetTier = sub.biz_name ? 3 : 2;
 
     const conn = await db.getPool().getConnection();
@@ -680,23 +729,30 @@ router.patch("/kyc/approve/:id", adminOnly, async (req, res, next) => {
       await conn.beginTransaction();
 
       await conn.query(
-        'UPDATE kyc_submissions SET status = "approved" WHERE id = ?',
-        [submissionId],
+        `UPDATE kyc_submissions
+         SET status = 'approved', reviewed_by = ?, reviewed_at = NOW()
+         WHERE id = ?`,
+        [adminId, submissionId],
       );
       await conn.query(
-        `
-  UPDATE users
-  SET
-      phone = ?,
-      phone_verified = 1,
-      phone_verified_at = NOW(),
-      kyc_tier = ?
-  WHERE id = ?
-  `,
+        `UPDATE users
+         SET phone = ?, phone_verified = 1, phone_verified_at = NOW(), kyc_tier = ?, is_verified = 1
+         WHERE id = ?`,
         [sub.phone, targetTier, sub.user_id],
       );
 
       await conn.commit();
+
+      // Fire notification (non-blocking — failure must not roll back the approval)
+      notify({
+        userId: sub.user_id,
+        type:   NOTIFICATION_TYPE.KYC_APPROVED,
+        data:   { name: sub.user_name },
+        email:  true,
+        sms:    false,
+        push:   true,
+      }).catch((e) => console.error("[KYC approve notify]", e));
+
       res.json({
         message: "KYC submission approved successfully.",
         target_tier: targetTier,
@@ -715,31 +771,46 @@ router.patch("/kyc/approve/:id", adminOnly, async (req, res, next) => {
 // PATCH /kyc/reject/:id - Reject KYC submission (Admin only)
 router.patch("/kyc/reject/:id", adminOnly, async (req, res, next) => {
   const submissionId = req.params.id;
+  const adminId = req.user.id;
   const { reason } = req.body;
 
   try {
     const submissions = await db.query(
-      "SELECT user_id FROM kyc_submissions WHERE id = ?",
+      "SELECT k.user_id, u.name as user_name FROM kyc_submissions k JOIN users u ON k.user_id = u.id WHERE k.id = ?",
       [submissionId],
     );
     if (submissions.length === 0) {
       return res.status(404).json({ error: "KYC submission not found." });
     }
     const sub = submissions[0];
+    const rejectionReason = reason || "Documents were unclear or expired.";
 
     const conn = await db.getPool().getConnection();
     try {
       await conn.beginTransaction();
 
       await conn.query(
-        'UPDATE kyc_submissions SET status = "rejected", rejection_reason = ? WHERE id = ?',
-        [reason || "Documents were unclear or expired.", submissionId],
+        `UPDATE kyc_submissions
+         SET status = 'rejected', rejection_reason = ?, reviewed_by = ?, reviewed_at = NOW()
+         WHERE id = ?`,
+        [rejectionReason, adminId, submissionId],
       );
-      await conn.query("UPDATE users SET kyc_tier = 1 WHERE id = ?", [
+      await conn.query("UPDATE users SET kyc_tier = 1, is_verified = 0 WHERE id = ?", [
         sub.user_id,
       ]);
 
       await conn.commit();
+
+      // Fire notification (non-blocking)
+      notify({
+        userId: sub.user_id,
+        type:   NOTIFICATION_TYPE.KYC_REJECTED,
+        data:   { name: sub.user_name, reason: rejectionReason },
+        email:  true,
+        sms:    false,
+        push:   true,
+      }).catch((e) => console.error("[KYC reject notify]", e));
+
       res.json({ message: "KYC submission rejected successfully." });
     } catch (err) {
       await conn.rollback();
