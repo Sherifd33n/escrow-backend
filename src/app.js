@@ -9,8 +9,8 @@ import walletRoutes from "./routes/wallet.js";
 import adminRoutes from "./routes/admin.js";
 import errorHandler from "./middleware/errorHandler.js";
 
-import exchangeRateRoutes   from "./routes/exchangeRate.js";
-import notificationsRoutes  from "./routes/notifications.js";
+import exchangeRateRoutes from "./routes/exchangeRate.js";
+import notificationsRoutes from "./routes/notifications.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -24,15 +24,21 @@ const devOrigins = [
   "http://127.0.0.1:5174",
 ];
 
-const prodFrontendUrl = process.env.FRONTEND_URL ? process.env.FRONTEND_URL.replace(/\/$/, "") : null;
+const prodFrontendUrl = process.env.FRONTEND_URL
+  ? process.env.FRONTEND_URL.replace(/\/$/, "")
+  : null;
 
-if (!isDev && !prodFrontendUrl) {
-  console.warn("[CORS Warning]: FRONTEND_URL environment variable is not defined in production.");
+if (!prodFrontendUrl) {
+  console.warn(
+    "[CORS Warning]: FRONTEND_URL environment variable is not set.",
+  );
 }
 
-const allowedOrigins = isDev
-  ? devOrigins
-  : (prodFrontendUrl ? [prodFrontendUrl] : []);
+// Always include FRONTEND_URL if set, plus localhost origins in dev
+const allowedOrigins = [
+  ...(isDev ? devOrigins : []),
+  ...(prodFrontendUrl ? [prodFrontendUrl] : []),
+];
 
 // Middleware
 app.use(
@@ -42,11 +48,15 @@ app.use(
       if (
         !origin ||
         allowedOrigins.includes(origin) ||
-        (isDev && (origin.startsWith("http://localhost:") || origin.startsWith("http://127.0.0.1:")))
+        (isDev &&
+          (origin.startsWith("http://localhost:") ||
+            origin.startsWith("http://127.0.0.1:")))
       ) {
         return callback(null, true);
       }
-      callback(new Error(`CORS policy error: Origin ${origin} is not allowed.`));
+      callback(
+        new Error(`CORS policy error: Origin ${origin} is not allowed.`),
+      );
     },
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
