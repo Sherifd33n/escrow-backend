@@ -9,6 +9,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { notify } from "../services/notificationService.js";
 import { NOTIFICATION_TYPE } from "../constants/notificationTypes.js";
+import { otpLimiter } from "../middleware/rateLimiter.js";
 
 const router = express.Router();
 
@@ -165,7 +166,7 @@ router.patch("/profile", async (req, res, next) => {
 });
 
 // POST /phone/send-otp — sends OTP via Twilio Verify
-router.post("/phone/send-otp", async (req, res, next) => {
+router.post("/phone/send-otp", otpLimiter, async (req, res, next) => {
   const userId = req.user.id;
   const rawPhone = req.body.phone || "";
   const phone = normalizePhone(rawPhone);
@@ -237,7 +238,7 @@ router.post("/phone/send-otp", async (req, res, next) => {
 });
 
 // POST /phone/verify — verifies OTP via Twilio Verify then marks phone as verified in DB
-router.post("/phone/verify", async (req, res, next) => {
+router.post("/phone/verify", otpLimiter, async (req, res, next) => {
   const userId = req.user.id;
 
   const phone = normalizePhone(req.body.phone);

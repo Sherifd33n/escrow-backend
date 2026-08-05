@@ -8,6 +8,7 @@ import { sendOTPEmail, sendPasswordResetLink } from "../utils/mailer.js";
 import { notify } from "../services/notificationService.js";
 import { NOTIFICATION_TYPE } from "../constants/notificationTypes.js";
 import { getRequestLocation } from "../utils/location.js";
+import { authLimiter, otpLimiter } from "../middleware/rateLimiter.js";
 
 const router = express.Router();
 
@@ -35,7 +36,7 @@ function generateOTP() {
 }
 
 // 1. Signup Route
-router.post("/signup", async (req, res, next) => {
+router.post("/signup", authLimiter, async (req, res, next) => {
   const { name, password, role } = req.body;
   const email = req.body.email?.trim().toLowerCase();
 
@@ -163,7 +164,7 @@ router.post("/signup", async (req, res, next) => {
 });
 
 // 2. Login Route
-router.post("/login", async (req, res, next) => {
+router.post("/login", authLimiter, async (req, res, next) => {
   const { password } = req.body;
   const email = req.body.email?.trim().toLowerCase();
 
@@ -306,7 +307,7 @@ router.post("/login", async (req, res, next) => {
 });
 
 // 3. Verify OTP Route
-router.post("/verify-otp", async (req, res, next) => {
+router.post("/verify-otp", otpLimiter, async (req, res, next) => {
   const { userId, code } = req.body;
 
   if (!userId || !code) {
@@ -446,7 +447,7 @@ router.post("/verify-otp", async (req, res, next) => {
 });
 
 // 4. Resend OTP Route
-router.post("/resend-otp", async (req, res, next) => {
+router.post("/resend-otp", otpLimiter, async (req, res, next) => {
   const { userId } = req.body;
 
   if (!userId) {
@@ -506,7 +507,7 @@ router.post("/resend-otp", async (req, res, next) => {
 });
 
 // 5. Forgot Password Route
-router.post("/forgot-password", async (req, res, next) => {
+router.post("/forgot-password", authLimiter, async (req, res, next) => {
   const email = req.body.email?.trim().toLowerCase();
 
   if (!email) {
@@ -575,7 +576,7 @@ router.post("/forgot-password", async (req, res, next) => {
 });
 
 // 6. Reset Password Route
-router.post("/reset-password", async (req, res, next) => {
+router.post("/reset-password", authLimiter, async (req, res, next) => {
   const { token, newPassword } = req.body;
 
   if (!token || !newPassword) {

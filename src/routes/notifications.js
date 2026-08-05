@@ -17,6 +17,7 @@ import express from "express";
 import db from "../config/db.js";
 import authMiddleware from "../middleware/auth.js";
 import { connect, disconnect } from "../services/sseService.js";
+import { saveSubscription, removeSubscription } from "../services/pushService.js";
 
 const router = express.Router();
 
@@ -77,6 +78,52 @@ router.get("/unread-count", async (req, res, next) => {
     );
 
     res.json({ count });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /notifications/vapid-key
+// Returns the public VAPID key required for frontend Web Push subscriptions.
+// ---------------------------------------------------------------------------
+router.get("/vapid-key", (req, res) => {
+  res.json({ publicKey: process.env.VAPID_PUBLIC_KEY || null });
+});
+
+// ---------------------------------------------------------------------------
+// POST /notifications/subscribe
+// Register a browser's Web Push subscription for the current user.
+// ---------------------------------------------------------------------------
+router.post("/subscribe", async (req, res, next) => {
+  try {
+    const userId = req.user.id;
+    const subscription = req.body.subscription;
+
+    if (!subscription) {
+      return res.status(400).json({ error: "Missing subscription object." });
+    }
+
+    await saveSubscription(userId, subscription);
+    res.json({ message: "Push notification subscription saved." });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// DELETE /notifications/subscribe
+// Unsubscribe a browser's Web Push subscription.
+// ---------------------------------------------------------------------------
+router.delete("/subscribe", async (req, res, next) => {
+  try {
+    const userId = req.user.id;
+    const { endpoint } = req.body;
+
+    if (endpoint) {
+      await removeSubscription(userId, endpoint);
+    }
+    res.json({ message: "Push notification subscription removed." });
   } catch (error) {
     next(error);
   }
