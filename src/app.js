@@ -29,9 +29,7 @@ const prodFrontendUrl = process.env.FRONTEND_URL
   : null;
 
 if (!prodFrontendUrl) {
-  console.warn(
-    "[CORS Warning]: FRONTEND_URL environment variable is not set.",
-  );
+  console.warn("[CORS Warning]: FRONTEND_URL environment variable is not set.");
 }
 
 // Always include FRONTEND_URL if set, plus localhost origins in dev
@@ -76,7 +74,12 @@ app.use("/api/admin", adminRoutes);
 
 // Root check
 app.get("/", (req, res) => {
-  res.json({ message: "Escrow API is running." });
+  res.json({
+    message: "Escrow API is running.",
+    version: "2026-08-05-cors-fix",
+    nodeEnv: process.env.NODE_ENV,
+    frontendUrl: process.env.FRONTEND_URL,
+  });
 });
 
 // Exchange rate
