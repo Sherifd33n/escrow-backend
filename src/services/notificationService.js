@@ -35,6 +35,7 @@ import { sendNotificationEmail } from "./emailService.js";
 import { sendNotificationSMS } from "./smsService.js";
 import { sendPushNotification } from "./pushService.js";
 import { getUserNotificationPreferences } from "./notificationPreferenceService.js";
+import { sendEvent } from "./sseService.js";
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -121,12 +122,16 @@ export async function notify({
     metadata,
   });
 
-  // ── REALTIME EXTENSION POINT ─────────────────────────────────────────────
-  // To push live updates via Socket.IO, emit here:
-  //   if (global.io) {
-  //     global.io.to(`user:${userId}`).emit("notification", { id, title, message, type });
-  //   }
-  // ─────────────────────────────────────────────────────────────────────────
+  // Push notification instantly to any connected browser
+  sendEvent(userId, {
+    id,
+    type,
+    title,
+    message,
+    channel: NOTIFICATION_CHANNEL.IN_APP,
+    metadata,
+    created_at: new Date().toISOString(),
+  });
 
   // 3. Fetch user preferences (non-critical — default to off on error).
   let prefs = { email: false, sms: false, push: false };

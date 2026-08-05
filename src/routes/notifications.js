@@ -13,9 +13,10 @@
  * their own notifications.
  */
 
-import express       from "express";
-import db            from "../config/db.js";
+import express from "express";
+import db from "../config/db.js";
 import authMiddleware from "../middleware/auth.js";
+import { connect, disconnect } from "../services/sseService.js";
 
 const router = express.Router();
 
@@ -30,8 +31,8 @@ router.use(authMiddleware);
 router.get("/", async (req, res, next) => {
   try {
     const userId = req.user.id;
-    const page   = Math.max(1, parseInt(req.query.page)  || 1);
-    const limit  = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
     const offset = (page - 1) * limit;
 
     const [notifications, [{ total }]] = await Promise.all([
@@ -81,6 +82,38 @@ router.get("/unread-count", async (req, res, next) => {
   }
 });
 
+// /////////////////////////
+router.get("/stream", (req, res) => {
+  const userId = req.user.id;
+
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+
+  res.flushHeaders();
+
+  connect(userId, res);
+
+  // Initial handshake
+  res.write(
+    `data: ${JSON.stringify({
+      type: "connected",
+      message: "Realtime notifications connected",
+    })}\n\n`,
+  );
+
+  // Keep the connection alive
+  const keepAlive = setInterval(() => {
+    res.write(": keepalive\n\n");
+  }, 30000);
+
+  req.on("close", () => {
+    clearInterval(keepAlive);
+    disconnect(userId, res);
+    res.end();
+  });
+});
+
 // ---------------------------------------------------------------------------
 // PATCH /notifications/read-all
 // Mark every unread notification for the user as read.
@@ -122,10 +155,9 @@ router.patch("/:id/read", async (req, res, next) => {
       return res.status(404).json({ error: "Notification not found." });
     }
 
-    await db.query(
-      "UPDATE notifications SET is_read = 1 WHERE id = ?",
-      [notifId],
-    );
+    await db.query("UPDATE notifications SET is_read = 1 WHERE id = ?", [
+      notifId,
+    ]);
 
     res.json({ message: "Notification marked as read." });
   } catch (error) {
@@ -139,7 +171,7 @@ router.patch("/:id/read", async (req, res, next) => {
 // ---------------------------------------------------------------------------
 router.delete("/:id", async (req, res, next) => {
   try {
-    const userId  = req.user.id;
+    const userId = req.user.id;
     const notifId = parseInt(req.params.id);
 
     if (isNaN(notifId)) {
