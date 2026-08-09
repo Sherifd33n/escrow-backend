@@ -342,6 +342,28 @@ WHERE is_verified IS NULL;
   } catch (err) {
     console.error("Migration failed to create notifications table:", err);
   }
+
+  // ----------------------------------------------------
+  // CREATE push_subscriptions TABLE
+  // ----------------------------------------------------
+
+  try {
+    await conn.query(`
+      CREATE TABLE IF NOT EXISTS \`push_subscriptions\` (
+        \`id\`         INT AUTO_INCREMENT PRIMARY KEY,
+        \`user_id\`    INT          NOT NULL,
+        \`endpoint\`   TEXT         NOT NULL,
+        \`p256dh\`     VARCHAR(255) NOT NULL,
+        \`auth\`       VARCHAR(255) NOT NULL,
+        \`created_at\` TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+        INDEX \`idx_push_subs_user\` (\`user_id\`),
+        FOREIGN KEY (\`user_id\`) REFERENCES \`users\` (\`id\`) ON DELETE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    `);
+    console.log("Migration: push_subscriptions table checked/created.");
+  } catch (err) {
+    console.error("Migration failed to create push_subscriptions table:", err);
+  }
 }
 
 export async function query(sql, params) {
