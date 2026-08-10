@@ -11,6 +11,8 @@ import errorHandler from "./middleware/errorHandler.js";
 
 import exchangeRateRoutes from "./routes/exchangeRate.js";
 import notificationsRoutes from "./routes/notifications.js";
+import subscriptionsRoutes from "./routes/subscriptions.js";
+import aiRoutes from "./routes/ai.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -62,8 +64,8 @@ app.use(
   }),
 );
 
-app.use(express.json({ limit: "10mb" }));
-app.use(express.urlencoded({ extended: true, limit: "10mb" }));
+app.use(express.json({ limit: "50mb" }));
+app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 app.use("/uploads", express.static(path.join(__dirname, "../uploads")));
 
 // Routes
@@ -88,6 +90,10 @@ app.use("/api/exchange-rate", exchangeRateRoutes);
 
 // Notifications
 app.use("/api/notifications", notificationsRoutes);
+
+// Subscriptions & AI
+app.use("/api/subscriptions", subscriptionsRoutes);
+app.use("/api/ai", aiRoutes);
 
 // Error handling
 app.use(errorHandler);

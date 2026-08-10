@@ -364,6 +364,115 @@ WHERE is_verified IS NULL;
   } catch (err) {
     console.error("Migration failed to create push_subscriptions table:", err);
   }
+
+  // ----------------------------------------------------
+  // TRANSACTIONS TABLE FEE COLUMNS MIGRATION
+  // ----------------------------------------------------
+  try {
+    const [feeRateCols] = await conn.query("SHOW COLUMNS FROM transactions LIKE 'escrow_fee_rate'");
+    if (feeRateCols.length === 0) {
+      await conn.query("ALTER TABLE transactions ADD COLUMN `escrow_fee_rate` DECIMAL(5, 4) NOT NULL DEFAULT 0.0350");
+      console.log("Migration: Added transactions.escrow_fee_rate");
+    }
+    const [feeAmountCols] = await conn.query("SHOW COLUMNS FROM transactions LIKE 'escrow_fee_amount'");
+    if (feeAmountCols.length === 0) {
+      await conn.query("ALTER TABLE transactions ADD COLUMN `escrow_fee_amount` DECIMAL(15, 2) NOT NULL DEFAULT 0.00");
+      console.log("Migration: Added transactions.escrow_fee_amount");
+    }
+  } catch (err) {
+    console.error("Migration failed for transaction fee columns:", err);
+  }
+
+  // ----------------------------------------------------
+  // SUBSCRIPTIONS TABLE EXTENSION MIGRATION
+  // ----------------------------------------------------
+  try {
+    await conn.query(`
+      ALTER TABLE subscriptions
+      MODIFY COLUMN status ENUM('pending', 'active', 'past_due', 'cancelled', 'expired', 'suspended') NOT NULL DEFAULT 'active'
+    `);
+  } catch (err) {
+    console.error("Migration failed to update subscriptions.status ENUM:", err);
+  }
+
+  const subColumns = [
+    { name: "payment_provider", definition: "VARCHAR(50) DEFAULT NULL" },
+    { name: "provider_customer_id", definition: "VARCHAR(255) DEFAULT NULL" },
+    { name: "provider_subscription_id", definition: "VARCHAR(255) DEFAULT NULL" },
+    { name: "provider_reference_id", definition: "VARCHAR(255) DEFAULT NULL" },
+    { name: "auto_renew", definition: "TINYINT(1) NOT NULL DEFAULT 1" },
+    { name: "cancelled_at", definition: "TIMESTAMP NULL DEFAULT NULL" },
+    { name: "metadata", definition: "JSON DEFAULT NULL" }
+  ];
+
+  for (const col of subColumns) {
+    try {
+      const [rows] = await conn.query("SHOW COLUMNS FROM subscriptions LIKE ?", [col.name]);
+      if (rows.length === 0) {
+        await conn.query(`ALTER TABLE subscriptions ADD COLUMN \`${col.name}\` ${col.definition}`);
+        console.log(`Migration: Added subscriptions.${col.name}`);
+      }
+    } catch (err) {
+      console.error(`Migration failed for subscriptions.${col.name}`, err);
+    }
+  }
+
+  // ----------------------------------------------------
+  // CREATE subscriptions_history TABLE
+  // ----------------------------------------------------
+  try {
+    await conn.query(`
+      CREATE TABLE IF NOT EXISTS \`subscriptions_history\` (
+        \`id\` INT AUTO_INCREMENT PRIMARY KEY,
+        \`user_id\` INT NOT NULL,
+        \`plan_id\` VARCHAR(50) NOT NULL,
+        \`billing_cycle\` ENUM('monthly', 'annual') NOT NULL DEFAULT 'monthly',
+        \`status\` VARCHAR(50) NOT NULL,
+        \`starts_at\` TIMESTAMP NULL DEFAULT NULL,
+        \`ends_at\` TIMESTAMP NULL DEFAULT NULL,
+        \`payment_provider\` VARCHAR(50) DEFAULT NULL,
+        \`provider_reference_id\` VARCHAR(255) DEFAULT NULL,
+        \`created_at\` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        INDEX \`idx_sub_hist_user\` (\`user_id\`),
+        FOREIGN KEY (\`user_id\`) REFERENCES \`users\` (\`id\`) ON DELETE CASCADE
+      ) ENGINE=InnoDB;
+    `);
+    console.log("Migration: subscriptions_history table checked/created.");
+  } catch (err) {
+    console.error("Migration failed to create subscriptions_history table:", err);
+  }
+
+  // ----------------------------------------------------
+  // CREATE ai_usage TABLE
+  // ----------------------------------------------------
+  try {
+    await conn.query(`
+      CREATE TABLE IF NOT EXISTS \`ai_usage\` (
+        \`id\` INT AUTO_INCREMENT PRIMARY KEY,
+        \`user_id\` INT NOT NULL,
+        \`feature\` VARCHAR(50) NOT NULL,
+        \`transaction_id\` INT DEFAULT NULL,
+        \`metadata\` JSON DEFAULT NULL,
+        \`created_at\` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        INDEX \`idx_ai_usage_user_feature\` (\`user_id\`, \`feature\`, \`created_at\`),
+        FOREIGN KEY (\`user_id\`) REFERENCES \`users\` (\`id\`) ON DELETE CASCADE
+      ) ENGINE=InnoDB;
+    `);
+    console.log("Migration: ai_usage table checked/created.");
+  } catch (err) {
+    console.error("Migration failed to create ai_usage table:", err);
+  }
+
+  // ----------------------------------------------------
+  // DISPUTES TABLE LONGTEXT MIGRATION
+  // ----------------------------------------------------
+  try {
+    await conn.query("ALTER TABLE disputes MODIFY COLUMN evidence LONGTEXT DEFAULT NULL");
+    await conn.query("ALTER TABLE disputes MODIFY COLUMN reason LONGTEXT NOT NULL");
+    console.log("Migration: Updated disputes.evidence and disputes.reason to LONGTEXT.");
+  } catch (err) {
+    console.error("Migration failed for disputes LONGTEXT columns:", err);
+  }
 }
 
 export async function query(sql, params) {

@@ -172,7 +172,7 @@ const CATEGORY_PATTERN = /^[a-zA-Z0-9 _-]{2,50}$/;
 
 // Centralised validation limits for dispute and review fields.
 const MAX_DISPUTE_REASON_LENGTH = 2000;
-const MAX_DISPUTE_EVIDENCE_LENGTH = 5000;
+const MAX_DISPUTE_EVIDENCE_LENGTH = 50_000_000;
 const MAX_REVIEW_COMMENT_LENGTH = 2000;
 
 // Returns "buyer", "seller", or null if userId isn't a party to tx.
@@ -219,21 +219,37 @@ async function resolveTransactionId(paramId) {
   return rows.length ? rows[0].id : null;
 }
 
+import { getUserEntitlements } from "../services/entitlementService.js";
+import { getUsdToNgnRate } from "../services/exchangeRateService.js";
+
 // 1. GET / - List transactions for current user (either buyer or seller)
 router.get("/", async (req, res, next) => {
   try {
     const userId = req.user.id;
-    const txs = await db.query(
-      `SELECT t.*, 
+    const entitlements = await getUserEntitlements(userId);
+    
+    let querySql = `SELECT t.*, 
               u_buyer.name as buyer_name, u_buyer.email as buyer_email,
               u_seller.name as seller_name, u_seller.email as seller_email
        FROM transactions t
        JOIN users u_buyer ON t.buyer_id = u_buyer.id
        JOIN users u_seller ON t.seller_id = u_seller.id
-       WHERE t.buyer_id = ? OR t.seller_id = ?
-       ORDER BY t.created_at DESC`,
-      [userId, userId],
-    );
+       WHERE (t.buyer_id = ? OR t.seller_id = ?)`;
+
+    const params = [userId, userId];
+
+    // Enforce transaction history limits for non-admin users
+    const historyMonths = entitlements.limits.transactionHistoryMonths;
+    if (req.user.role !== "admin" && isFinite(historyMonths) && historyMonths > 0) {
+      const cutoffDate = new Date();
+      cutoffDate.setMonth(cutoffDate.getMonth() - historyMonths);
+      querySql += ` AND t.created_at >= ?`;
+      params.push(cutoffDate);
+    }
+
+    querySql += ` ORDER BY t.created_at DESC`;
+
+    const txs = await db.query(querySql, params);
 
     if (txs.length > 0) {
       const txIds = txs.map((t) => t.id);
@@ -344,8 +360,78 @@ router.post("/", async (req, res, next) => {
     });
   }
 
-  // Issue 9: normalize once and reuse the same value for both the lookup
-  // and any error message, instead of echoing the raw, un-normalized input.
+  // ----------------------------------------------------
+  // SERVER-SIDE ENTITLEMENT & AUTHORIZATION CHECKS
+  // ----------------------------------------------------
+  const entitlements = await getUserEntitlements(userId);
+
+  // 1. KYC requirement check: Level 2 required for escrow creation
+  if (entitlements.effectiveLevel < 2) {
+    return res.status(403).json({
+      code: "KYC_LEVEL_REQUIRED",
+      requiredKycLevel: 2,
+      currentKycLevel: entitlements.kyc.level,
+      message: "Complete KYC Level 2 to create escrow transactions.",
+    });
+  }
+
+  // 2. Active deal limit check
+  if (entitlements.usage.activeDealsCount >= entitlements.limits.maxActiveDeals) {
+    return res.status(403).json({
+      code: "ACTIVE_DEAL_LIMIT_REACHED",
+      limit: entitlements.limits.maxActiveDeals,
+      message: `You have reached the maximum number of active deals (${entitlements.limits.maxActiveDeals}) for your plan.`,
+    });
+  }
+
+  // 3. Multi-currency entitlement check
+  if (normalizedCurrency !== "USD" && !entitlements.capabilities.canUseMultiCurrency) {
+    return res.status(403).json({
+      code: "MULTI_CURRENCY_NOT_AVAILABLE",
+      message: "Multi-currency transactions require a Gold or Diamond plan.",
+    });
+  }
+
+  // 4. Escrow amount limit check (converted to USD equivalent)
+  let amountInUsd = parsedAmount;
+  if (normalizedCurrency === "NGN") {
+    try {
+      const rate = await getUsdToNgnRate();
+      if (rate && rate > 0) {
+        amountInUsd = parsedAmount / rate;
+      }
+    } catch (e) {
+      amountInUsd = parsedAmount / 1500;
+    }
+  } else if (normalizedCurrency === "GBP") {
+    amountInUsd = parsedAmount * 1.30;
+  } else if (normalizedCurrency === "EUR") {
+    amountInUsd = parsedAmount * 1.10;
+  } else if (normalizedCurrency === "AUD" || normalizedCurrency === "CAD") {
+    amountInUsd = parsedAmount * 0.70;
+  }
+
+  if (amountInUsd > entitlements.limits.maxEscrowUsd) {
+    if (entitlements.subscription.subscriptionTier > entitlements.effectiveLevel) {
+      return res.status(403).json({
+        code: "KYC_LEVEL_REQUIRED",
+        requiredKycLevel: entitlements.subscription.subscriptionTier,
+        currentKycLevel: entitlements.kyc.level,
+        message: `Complete KYC Level ${entitlements.subscription.subscriptionTier} to unlock your ${entitlements.subscription.planName} escrow limit.`,
+      });
+    }
+    return res.status(403).json({
+      code: "ESCROW_LIMIT_EXCEEDED",
+      maxEscrowUsd: entitlements.limits.maxEscrowUsd,
+      requestedEscrowUsd: Math.round(amountInUsd),
+      message: `Your ${entitlements.subscription.planName} plan allows up to $${entitlements.limits.maxEscrowUsd.toLocaleString()} per escrow.`,
+    });
+  }
+
+  // Determine & snapshot fee rate and amount
+  const escrowFeeRate = entitlements.limits.escrowFeeRate;
+  const escrowFeeAmount = Number((parsedAmount * escrowFeeRate).toFixed(2));
+
   const normalizedCounterpartyEmail = counterparty.trim().toLowerCase();
 
   const conn = await db.getPool().getConnection();
@@ -400,8 +486,8 @@ router.post("/", async (req, res, next) => {
       try {
         const [txnResult] = await conn.query(
           `INSERT INTO transactions
-       (txn_code, title, category, amount, currency, buyer_id, seller_id, status, review_days, milestones_count)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (txn_code, title, category, amount, currency, buyer_id, seller_id, escrow_fee_rate, escrow_fee_amount, status, review_days, milestones_count)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             txnCode,
             cleanTitle,
@@ -410,6 +496,8 @@ router.post("/", async (req, res, next) => {
             normalizedCurrency,
             buyerId,
             sellerId,
+            escrowFeeRate,
+            escrowFeeAmount,
             TRANSACTION_STATUS.PENDING,
             reviewDays,
             count,

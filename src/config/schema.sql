@@ -69,6 +69,8 @@ CREATE TABLE IF NOT EXISTS `transactions` (
   `currency` VARCHAR(3) NOT NULL DEFAULT 'USD',
   `buyer_id` INT NOT NULL,
   `seller_id` INT NOT NULL,
+  `escrow_fee_rate` DECIMAL(5, 4) NOT NULL DEFAULT 0.0350,
+  `escrow_fee_amount` DECIMAL(15, 2) NOT NULL DEFAULT 0.00,
   `status` ENUM('pending', 'funded', 'inprogress', 'inspection', 'audit', 'approved', 'revision', 'completed', 'disputed') NOT NULL DEFAULT 'pending',
   `review_days` INT NOT NULL DEFAULT 3,
   `milestones_count` INT NOT NULL DEFAULT 1,
@@ -78,26 +80,53 @@ CREATE TABLE IF NOT EXISTS `transactions` (
   FOREIGN KEY (`seller_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB;
 
-
-
-CREATE TABLE IF NOT EXISTS `transaction_events` (
+-- Subscriptions table
+CREATE TABLE IF NOT EXISTS `subscriptions` (
   `id` INT AUTO_INCREMENT PRIMARY KEY,
-  `transaction_id` INT NOT NULL,
-  `user_id` INT NOT NULL,
-  `action` VARCHAR(50) NOT NULL,
-  `from_status` VARCHAR(50) DEFAULT NULL,
-  `to_status` VARCHAR(50) DEFAULT NULL,
-  `note` TEXT DEFAULT NULL,
+  `user_id` INT NOT NULL UNIQUE,
+  `plan_id` VARCHAR(50) NOT NULL DEFAULT 'silver',
+  `billing_cycle` ENUM('monthly', 'annual') NOT NULL DEFAULT 'monthly',
+  `status` ENUM('pending', 'active', 'past_due', 'cancelled', 'expired', 'suspended') NOT NULL DEFAULT 'active',
+  `starts_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  `ends_at` TIMESTAMP NULL DEFAULT NULL,
+  `payment_provider` VARCHAR(50) DEFAULT NULL,
+  `provider_customer_id` VARCHAR(255) DEFAULT NULL,
+  `provider_subscription_id` VARCHAR(255) DEFAULT NULL,
+  `provider_reference_id` VARCHAR(255) DEFAULT NULL,
+  `auto_renew` TINYINT(1) NOT NULL DEFAULT 1,
+  `cancelled_at` TIMESTAMP NULL DEFAULT NULL,
   `metadata` JSON DEFAULT NULL,
   `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB;
 
-  FOREIGN KEY (`transaction_id`)
-    REFERENCES `transactions`(`id`)
-    ON DELETE CASCADE,
+-- Subscription History table
+CREATE TABLE IF NOT EXISTS `subscriptions_history` (
+  `id` INT AUTO_INCREMENT PRIMARY KEY,
+  `user_id` INT NOT NULL,
+  `plan_id` VARCHAR(50) NOT NULL,
+  `billing_cycle` ENUM('monthly', 'annual') NOT NULL DEFAULT 'monthly',
+  `status` VARCHAR(50) NOT NULL,
+  `starts_at` TIMESTAMP NULL DEFAULT NULL,
+  `ends_at` TIMESTAMP NULL DEFAULT NULL,
+  `payment_provider` VARCHAR(50) DEFAULT NULL,
+  `provider_reference_id` VARCHAR(255) DEFAULT NULL,
+  `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  INDEX `idx_sub_hist_user` (`user_id`),
+  FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB;
 
-  FOREIGN KEY (`user_id`)
-    REFERENCES `users`(`id`)
-    ON DELETE CASCADE
+-- AI Usage tracking table
+CREATE TABLE IF NOT EXISTS `ai_usage` (
+  `id` INT AUTO_INCREMENT PRIMARY KEY,
+  `user_id` INT NOT NULL,
+  `feature` VARCHAR(50) NOT NULL,
+  `transaction_id` INT DEFAULT NULL,
+  `metadata` JSON DEFAULT NULL,
+  `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  INDEX `idx_ai_usage_user_feature` (`user_id`, `feature`, `created_at`),
+  FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB;
 
 -- Milestones table
@@ -144,10 +173,10 @@ CREATE TABLE IF NOT EXISTS `disputes` (
   `id` INT AUTO_INCREMENT PRIMARY KEY,
   `transaction_id` INT NOT NULL,
   `filed_by` INT NOT NULL,
-  `reason` TEXT NOT NULL,
-  `evidence` TEXT DEFAULT NULL,
+  `reason` LONGTEXT NOT NULL,
+  `evidence` LONGTEXT DEFAULT NULL,
   `status` ENUM('filed', 'under_review', 'resolved') NOT NULL DEFAULT 'filed',
-  `resolution` TEXT DEFAULT NULL,
+  `resolution` LONGTEXT DEFAULT NULL,
   `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   `updated_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   FOREIGN KEY (`transaction_id`) REFERENCES `transactions` (`id`) ON DELETE CASCADE,
