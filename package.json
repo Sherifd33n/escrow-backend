@@ -19,6 +19,7 @@
     "multer": "^2.2.0",
     "mysql2": "^3.14.1",
     "nodemailer": "^7.0.5",
+    "openai": "^6.49.0",
     "twilio": "^6.0.2",
     "web-push": "^3.6.7"
   }
