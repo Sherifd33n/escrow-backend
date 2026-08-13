@@ -293,6 +293,31 @@ const TEMPLATES = {
     smsText: "Escrow: Dispute for \"{{transaction}}\" resolved. Winner: {{winner}}.",
   },
 
+  [NOTIFICATION_TYPE.CONTRACT_CHANGE_REQUESTED]: {
+    title:        "Contract Change Requested",
+    message:      "Provider \"{{provider}}\" has requested changes to the contract for \"{{transaction}}\".",
+    emailSubject: "Escrow — Provider Requests Contract Changes",
+    emailBody: (d) => emailWrap("Contract Change Requested", `
+      <h2 style="margin-top:0;color:#d97706;">Contract Change Requested</h2>
+      <p style="font-size:16px;color:#555;line-height:1.8;">
+        <strong>${d.provider}</strong> has reviewed the contract for
+        <strong>${d.transaction}</strong> and is requesting changes before starting work.
+      </p>
+      <p style="font-size:15px;color:#333;font-weight:bold;margin-bottom:6px;">Their concerns:</p>
+      <blockquote style="border-left:4px solid #d97706;margin:12px 0;padding:12px 18px;background:#fffbeb;color:#444;font-size:14px;line-height:1.8;border-radius:0 6px 6px 0;">
+        ${d.message}
+      </blockquote>
+      <p style="font-size:14px;color:#555;line-height:1.8;">
+        Please log in to your dashboard, review the contract, and update the scope or
+        reply to the provider directly before they begin work.
+      </p>
+      <p style="font-size:13px;color:#999;">
+        Transaction ref: <strong>${d.txnCode || "—"}</strong>
+      </p>`),
+    smsText: "Escrow: Provider {{provider}} requested contract changes on \"{{transaction}}\". Log in to review.",
+  },
+
+
   [NOTIFICATION_TYPE.REVIEW_RECEIVED]: {
     title:        "New Review",
     message:      "You received a {{rating}}-star review from {{reviewer}}.",

@@ -71,13 +71,42 @@ CREATE TABLE IF NOT EXISTS `transactions` (
   `seller_id` INT NOT NULL,
   `escrow_fee_rate` DECIMAL(5, 4) NOT NULL DEFAULT 0.0350,
   `escrow_fee_amount` DECIMAL(15, 2) NOT NULL DEFAULT 0.00,
+  `escrow_balance` DECIMAL(15, 2) NOT NULL DEFAULT 0.00,
+  `released_amount` DECIMAL(15, 2) NOT NULL DEFAULT 0.00,
   `status` ENUM('pending', 'funded', 'inprogress', 'inspection', 'audit', 'approved', 'revision', 'completed', 'disputed') NOT NULL DEFAULT 'pending',
   `review_days` INT NOT NULL DEFAULT 3,
   `milestones_count` INT NOT NULL DEFAULT 1,
+  `scope_json` JSON DEFAULT NULL,
+  `ai_estimated_timeline` VARCHAR(100) DEFAULT NULL,
+  `agreed_duration` VARCHAR(100) DEFAULT NULL,
+  `agreed_deadline` TIMESTAMP NULL DEFAULT NULL,
+  `revision_policy` VARCHAR(255) DEFAULT '2 rounds of minor revisions',
   `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   `updated_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   FOREIGN KEY (`buyer_id`) REFERENCES `users` (`id`) ON DELETE CASCADE,
   FOREIGN KEY (`seller_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+-- AI Audits table (preserves audit history per submission)
+CREATE TABLE IF NOT EXISTS `ai_audits` (
+  `id` INT AUTO_INCREMENT PRIMARY KEY,
+  `transaction_id` INT NOT NULL,
+  `milestone_id` INT DEFAULT NULL,
+  `submission_id` INT DEFAULT NULL,
+  `audited_by` INT NOT NULL,
+  `score` INT NOT NULL DEFAULT 0,
+  `status` VARCHAR(50) NOT NULL,
+  `risk` VARCHAR(50) NOT NULL,
+  `risk_score` INT NOT NULL DEFAULT 0,
+  `summary` TEXT NOT NULL,
+  `recommendation` TEXT NOT NULL,
+  `checks_json` JSON DEFAULT NULL,
+  `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  INDEX `idx_ai_audits_tx` (`transaction_id`),
+  INDEX `idx_ai_audits_m` (`milestone_id`),
+  INDEX `idx_ai_audits_sub` (`submission_id`),
+  FOREIGN KEY (`transaction_id`) REFERENCES `transactions` (`id`) ON DELETE CASCADE,
+  FOREIGN KEY (`audited_by`) REFERENCES `users` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB;
 
 -- Subscriptions table
@@ -137,6 +166,10 @@ CREATE TABLE IF NOT EXISTS `milestones` (
   `amount` DECIMAL(15, 2) NOT NULL,
   `status` ENUM('pending', 'paid', 'due', 'upcoming', 'submitted', 'approved', 'rejected') NOT NULL DEFAULT 'pending',
   `deliverable_note` TEXT DEFAULT NULL,
+  `description` TEXT DEFAULT NULL,
+  `ai_suggested_timeline` VARCHAR(100) DEFAULT NULL,
+  `start_date` TIMESTAMP NULL DEFAULT NULL,
+  `due_date` TIMESTAMP NULL DEFAULT NULL,
   `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   `updated_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   FOREIGN KEY (`transaction_id`) REFERENCES `transactions` (`id`) ON DELETE CASCADE

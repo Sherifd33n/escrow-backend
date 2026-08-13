@@ -222,6 +222,25 @@ async function resolveTransactionId(paramId) {
 import { getUserEntitlements } from "../services/entitlementService.js";
 import { getUsdToNgnRate } from "../services/exchangeRateService.js";
 
+async function populateMilestoneDetails(milestones) {
+  if (!milestones || milestones.length === 0) return;
+  const mIds = milestones.map((m) => m.id);
+
+  try {
+    const [submissions, revisions] = await Promise.all([
+      db.query("SELECT * FROM milestone_submissions WHERE milestone_id IN (?) ORDER BY version ASC", [mIds]),
+      db.query("SELECT * FROM revision_requests WHERE milestone_id IN (?) ORDER BY created_at ASC", [mIds]),
+    ]);
+
+    milestones.forEach((m) => {
+      m.submissions = submissions.filter((s) => s.milestone_id === m.id);
+      m.revision_requests = revisions.filter((r) => r.milestone_id === m.id);
+    });
+  } catch (err) {
+    console.error("Error populating milestone details:", err);
+  }
+}
+
 // 1. GET / - List transactions for current user (either buyer or seller)
 router.get("/", async (req, res, next) => {
   try {
@@ -257,6 +276,7 @@ router.get("/", async (req, res, next) => {
         "SELECT * FROM milestones WHERE transaction_id IN (?) ORDER BY id ASC",
         [txIds],
       );
+      await populateMilestoneDetails(milestones);
       txs.forEach((tx) => {
         tx.milestones = milestones.filter((m) => m.transaction_id === tx.id);
       });
@@ -279,6 +299,11 @@ router.post("/", async (req, res, next) => {
     role,
     review_days,
     milestones_count,
+    scope_json,
+    ai_estimated_timeline,
+    agreed_duration,
+    agreed_deadline,
+    revision_policy,
   } = req.body;
   const userId = req.user.id;
 
@@ -287,6 +312,23 @@ router.post("/", async (req, res, next) => {
       .status(400)
       .json({ error: "Missing required transaction fields." });
   }
+
+  // Parse scope_json if provided
+  let parsedScopeJson = null;
+  if (scope_json) {
+    try {
+      parsedScopeJson = typeof scope_json === "object" ? scope_json : JSON.parse(scope_json);
+    } catch (e) {
+      console.warn("Invalid scope_json passed to transaction create:", e.message);
+    }
+  }
+
+  const scopeMilestones = parsedScopeJson?.milestones && Array.isArray(parsedScopeJson.milestones) && parsedScopeJson.milestones.length > 0
+    ? parsedScopeJson.milestones
+    : null;
+
+  const estimatedTimeline = ai_estimated_timeline || parsedScopeJson?.timeline || null;
+  const revPolicy = revision_policy || parsedScopeJson?.revisions || '2 rounds of minor revisions';
 
   // Trim title and make sure it isn't empty after trimming
   const cleanTitle = title.trim();
@@ -340,17 +382,11 @@ router.post("/", async (req, res, next) => {
   }
 
   // Validate milestone count
-  const count = milestones_count === undefined ? 1 : parseInt(milestones_count);
-  if (isNaN(count) || count < 1) {
-    return res.status(400).json({
-      error: "Milestone count must be at least 1.",
-    });
-  }
-  if (count > 100) {
-    return res.status(400).json({
-      error: "Maximum milestone count is 100.",
-    });
-  }
+  const userCount = milestones_count !== undefined && !isNaN(parseInt(milestones_count)) ? parseInt(milestones_count) : null;
+  const rawCount = (userCount !== null && userCount > 0)
+    ? userCount
+    : (scopeMilestones && scopeMilestones.length ? scopeMilestones.length : 1);
+  const count = isNaN(rawCount) || rawCount < 1 ? 1 : Math.min(100, rawCount);
 
   // Validate review days (Issue 11: shared helper)
   const reviewDays = parseReviewDays(review_days);
@@ -486,8 +522,8 @@ router.post("/", async (req, res, next) => {
       try {
         const [txnResult] = await conn.query(
           `INSERT INTO transactions
-       (txn_code, title, category, amount, currency, buyer_id, seller_id, escrow_fee_rate, escrow_fee_amount, status, review_days, milestones_count)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (txn_code, title, category, amount, currency, buyer_id, seller_id, escrow_fee_rate, escrow_fee_amount, status, review_days, milestones_count, scope_json, ai_estimated_timeline, agreed_duration, agreed_deadline, revision_policy)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             txnCode,
             cleanTitle,
@@ -501,6 +537,11 @@ router.post("/", async (req, res, next) => {
             TRANSACTION_STATUS.PENDING,
             reviewDays,
             count,
+            parsedScopeJson ? JSON.stringify(parsedScopeJson) : null,
+            estimatedTimeline,
+            agreed_duration || null,
+            agreed_deadline ? new Date(agreed_deadline) : null,
+            revPolicy,
           ],
         );
 
@@ -526,31 +567,36 @@ router.post("/", async (req, res, next) => {
         sellerId,
         amount: parsedAmount,
         currency: normalizedCurrency,
+        hasScope: !!parsedScopeJson,
       },
     });
 
     // 3. Create milestones
     const totalAmount = parsedAmount;
-
     const baseAmount = Number((totalAmount / count).toFixed(2));
-
     let remaining = totalAmount;
 
     for (let i = 1; i <= count; i++) {
       const currentAmount =
         i === count ? Number(remaining.toFixed(2)) : baseAmount;
-
       remaining -= currentAmount;
+
+      const mScope = scopeMilestones ? scopeMilestones[i - 1] : null;
+      const milestoneTitle = mScope?.name || `Milestone ${i} of ${count}`;
+      const milestoneDesc = mScope?.description || null;
+      const milestoneTimeline = mScope?.timeline || null;
 
       await conn.query(
         `INSERT INTO milestones
-    (transaction_id,title,amount,status)
-    VALUES (?,?,?,?)`,
+    (transaction_id, title, amount, status, description, ai_suggested_timeline)
+    VALUES (?, ?, ?, ?, ?, ?)`,
         [
           transactionId,
-          `Milestone ${i} of ${count}`,
+          milestoneTitle,
           currentAmount,
           i === 1 ? MILESTONE_STATUS.UPCOMING : MILESTONE_STATUS.PENDING,
+          milestoneDesc,
+          milestoneTimeline,
         ],
       );
     }
@@ -625,6 +671,257 @@ router.post("/", async (req, res, next) => {
   }
 });
 
+// 2b. PATCH /:id/scope — Attach or update confirmed AI scope on an existing transaction (buyer only)
+router.patch("/:id/scope", async (req, res, next) => {
+  const userId = req.user.id;
+  const { scope_json, ai_estimated_timeline, agreed_duration, agreed_deadline, revision_policy } = req.body;
+
+  if (!scope_json || typeof scope_json !== "object") {
+    return res.status(400).json({ error: "scope_json (object) is required." });
+  }
+
+  try {
+    const transactionId = await resolveTransactionId(req.params.id);
+    if (!transactionId) return res.status(404).json({ error: "Transaction not found." });
+
+    const txs = await db.query("SELECT * FROM transactions WHERE id = ?", [transactionId]);
+    if (!txs.length) return res.status(404).json({ error: "Transaction not found." });
+
+    const tx = txs[0];
+
+    // Only the buyer (client) may attach/update scope
+    if (tx.buyer_id !== userId) {
+      return res.status(403).json({ error: "Only the client (buyer) can attach a scope to a transaction." });
+    }
+
+    const scopeStr = JSON.stringify(scope_json);
+    const estimatedTimeline = ai_estimated_timeline || scope_json.timeline || null;
+    const revPolicy = revision_policy || scope_json.revisions || "2 rounds of minor revisions";
+
+    const scopeMilestones = Array.isArray(scope_json.milestones) ? scope_json.milestones : [];
+    const count = scopeMilestones.length > 0 ? scopeMilestones.length : (tx.milestones_count || 1);
+
+    // Recalculate escrow fee amount based on rate and transaction value
+    const totalAmount = parseFloat(tx.amount || 0);
+    const escrowFeeRate = parseFloat(tx.escrow_fee_rate || 0.05);
+    const escrowFeeAmount = Number((totalAmount * escrowFeeRate).toFixed(2));
+
+    await db.query(
+      `UPDATE transactions SET
+        scope_json = ?,
+        ai_estimated_timeline = ?,
+        agreed_duration = ?,
+        agreed_deadline = ?,
+        revision_policy = ?,
+        milestones_count = ?,
+        escrow_fee_amount = ?
+       WHERE id = ?`,
+      [
+        scopeStr,
+        estimatedTimeline,
+        agreed_duration || null,
+        agreed_deadline ? new Date(agreed_deadline) : null,
+        revPolicy,
+        count,
+        escrowFeeAmount,
+        transactionId,
+      ]
+    );
+
+    // Check existing milestones in DB
+    const dbMilestones = await db.query(
+      "SELECT * FROM milestones WHERE transaction_id = ? ORDER BY id ASC",
+      [transactionId]
+    );
+
+    const hasPaidOrApproved = dbMilestones.some(m => ["paid", "approved"].includes(m.status));
+
+    if (!hasPaidOrApproved && scopeMilestones.length > 0) {
+      // Pre-funding phase: recreate milestones to match the updated scope breakdown count & details
+      await db.query("DELETE FROM milestones WHERE transaction_id = ?", [transactionId]);
+
+      const baseAmount = Number((totalAmount / count).toFixed(2));
+      let remaining = totalAmount;
+
+      for (let i = 1; i <= count; i++) {
+        const currentAmount = i === count ? Number(remaining.toFixed(2)) : baseAmount;
+        remaining -= currentAmount;
+
+        const mScope = scopeMilestones[i - 1];
+        const milestoneTitle = mScope?.name || `Milestone ${i} of ${count}`;
+        const milestoneDesc = mScope?.description || null;
+        const milestoneTimeline = mScope?.timeline || null;
+
+        await db.query(
+          `INSERT INTO milestones
+           (transaction_id, title, amount, status, description, ai_suggested_timeline)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          [
+            transactionId,
+            milestoneTitle,
+            currentAmount,
+            i === 1 ? MILESTONE_STATUS.UPCOMING : MILESTONE_STATUS.PENDING,
+            milestoneDesc,
+            milestoneTimeline,
+          ]
+        );
+      }
+    } else if (scopeMilestones.length > 0) {
+      // Work/paid in progress: update titles/descriptions/timelines without disturbing paid status
+      for (let i = 0; i < Math.min(scopeMilestones.length, dbMilestones.length); i++) {
+        const sm = scopeMilestones[i];
+        const dm = dbMilestones[i];
+        await db.query(
+          `UPDATE milestones SET title = ?, description = ?, ai_suggested_timeline = ? WHERE id = ?`,
+          [sm.name || dm.title, sm.description || null, sm.timeline || null, dm.id]
+        );
+      }
+    }
+
+    // Log transaction event
+    const conn = await db.getPool().getConnection();
+    try {
+      await logTransactionEvent({
+        conn,
+        transactionId: tx.id,
+        userId,
+        action: "contract_scope_updated",
+        note: "Contract scope and milestone breakdown updated by client.",
+        metadata: {
+          updatedBy: userId,
+          milestonesCount: count,
+          escrowFeeAmount,
+        },
+      });
+    } finally {
+      conn.release();
+    }
+
+    // Notify provider (seller) that contract scope was updated
+    notify({
+      userId: tx.seller_id,
+      type: NOTIFICATION_TYPE.CONTRACT_UPDATED || "transaction_updated",
+      data: {
+        transaction: tx.title,
+        message: "The client has updated the transaction scope and contract terms.",
+      },
+      email: true,
+      push: true,
+    }).catch(err => console.error("Notification dispatch error:", err));
+
+    // Also notify buyer (client) so SSE triggers UI refresh on open tabs
+    notify({
+      userId: tx.buyer_id,
+      type: NOTIFICATION_TYPE.CONTRACT_UPDATED || "transaction_updated",
+      data: {
+        transaction: tx.title,
+        message: "Contract scope updated successfully.",
+      },
+    }).catch(err => console.error("Notification dispatch error:", err));
+
+    // Return updated transaction
+    const updated = await db.query(
+      `SELECT t.*, u_buyer.name as buyer_name, u_seller.name as seller_name
+       FROM transactions t
+       JOIN users u_buyer ON t.buyer_id = u_buyer.id
+       JOIN users u_seller ON t.seller_id = u_seller.id
+       WHERE t.id = ?`,
+      [transactionId]
+    );
+    const milestones = await db.query(
+      "SELECT * FROM milestones WHERE transaction_id = ? ORDER BY id ASC",
+      [transactionId]
+    );
+    updated[0].milestones = milestones;
+
+    res.json({ success: true, transaction: updated[0] });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// 2c. POST /:id/scope/request-changes — Provider flags contract concerns to client (pre-work only)
+router.post("/:id/scope/request-changes", async (req, res, next) => {
+  const userId = req.user.id;
+  const { message } = req.body;
+
+  if (!message || !message.trim()) {
+    return res.status(400).json({ error: "A message describing the requested changes is required." });
+  }
+  if (message.trim().length > 2000) {
+    return res.status(400).json({ error: "Message must be 2000 characters or fewer." });
+  }
+
+  try {
+    const transactionId = await resolveTransactionId(req.params.id);
+    if (!transactionId) return res.status(404).json({ error: "Transaction not found." });
+
+    const txs = await db.query(
+      `SELECT t.*, u_seller.name as seller_name, u_buyer.name as buyer_name, u_buyer.email as buyer_email
+       FROM transactions t
+       JOIN users u_seller ON t.seller_id = u_seller.id
+       JOIN users u_buyer  ON t.buyer_id  = u_buyer.id
+       WHERE t.id = ?`,
+      [transactionId]
+    );
+    if (!txs.length) return res.status(404).json({ error: "Transaction not found." });
+
+    const tx = txs[0];
+
+    // Only the seller (provider) may request changes
+    if (tx.seller_id !== userId) {
+      return res.status(403).json({ error: "Only the service provider can request contract changes." });
+    }
+
+    // Only allowed before work starts (pending or funded)
+    if (!["pending", "funded"].includes(tx.status)) {
+      return res.status(400).json({
+        error: `Contract changes can only be requested before work starts. Current status: ${tx.status}.`
+      });
+    }
+
+    // Log transaction event so client can see requested contract changes
+    const conn = await db.getPool().getConnection();
+    try {
+      await logTransactionEvent({
+        conn,
+        transactionId: tx.id,
+        userId,
+        action: "contract_change_requested",
+        note: message.trim(),
+        metadata: {
+          requestedBy: userId,
+          sellerName: tx.seller_name,
+          message: message.trim(),
+        },
+      });
+    } finally {
+      conn.release();
+    }
+
+    // Notify the buyer (client) with the provider's concerns
+    notify({
+      userId: tx.buyer_id,
+      type: NOTIFICATION_TYPE.CONTRACT_CHANGE_REQUESTED,
+      data: {
+        provider:    tx.seller_name,
+        transaction: tx.title,
+        txnCode:     tx.txn_code,
+        message:     message.trim(),
+      },
+      email: true,
+      push:  true,
+    }).catch(err => console.error("Contract change request notification error:", err));
+
+    res.json({
+      success: true,
+      message: "Your change request has been sent to the client. They will be notified immediately.",
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // 3. GET /:id - Get a single transaction by ID or code, including its milestones
 router.get("/:id", async (req, res, next) => {
   const paramId = req.params.id;
@@ -663,6 +960,7 @@ router.get("/:id", async (req, res, next) => {
       "SELECT * FROM milestones WHERE transaction_id = ? ORDER BY id ASC",
       [tx.id],
     );
+    await populateMilestoneDetails(milestones);
 
     tx.milestones = milestones;
 
@@ -763,6 +1061,14 @@ router.patch("/:id/status", async (req, res, next) => {
     const tx = txs[0];
     const previousStatus = tx.status;
 
+    if (previousStatus === TRANSACTION_STATUS.DISPUTED) {
+      return rollbackWithError(conn, res, 400, "Transaction is currently under dispute.");
+    }
+
+    if (nextStatus === TRANSACTION_STATUS.INSPECTION && previousStatus === TRANSACTION_STATUS.INSPECTION) {
+      return rollbackWithError(conn, res, 400, "Submission is currently under review.");
+    }
+
     const requesterRole = participantRole(tx, userId);
     if (requesterRole === null) {
       return rollbackWithError(conn, res, 403, "Access denied.");
@@ -799,6 +1105,60 @@ router.patch("/:id/status", async (req, res, next) => {
         action,
       });
 
+      // Maintain milestone submission and revision history on transaction status change
+      const [txMilestones] = await conn.query(
+        "SELECT * FROM milestones WHERE transaction_id = ? ORDER BY id ASC FOR UPDATE",
+        [tx.id]
+      );
+      const targetM = txMilestones.find(m => ["submitted", "inprogress", "rejected", "due", "pending", "paid", "upcoming"].includes(m.status)) || txMilestones[0];
+
+      if (targetM) {
+        if (nextStatus === TRANSACTION_STATUS.INSPECTION) {
+          const [subCount] = await conn.query(
+            "SELECT COUNT(*) as cnt FROM milestone_submissions WHERE milestone_id = ?",
+            [targetM.id]
+          );
+          const nextVer = (subCount[0]?.cnt || 0) + 1;
+          const noteText = req.body.deliverable_note || req.body.note || targetM.deliverable_note || "Deliverable submitted for review";
+
+          await conn.query(
+            `INSERT INTO milestone_submissions (transaction_id, milestone_id, submitted_by, version, deliverable_note, status)
+             VALUES (?, ?, ?, ?, ?, 'submitted')`,
+            [tx.id, targetM.id, userId, nextVer, noteText]
+          );
+
+          await conn.query(
+            "UPDATE milestones SET status = 'submitted', deliverable_note = ? WHERE id = ?",
+            [noteText, targetM.id]
+          );
+          await conn.query(
+            "UPDATE revision_requests SET status = 'addressed' WHERE milestone_id = ? AND status = 'open'",
+            [targetM.id]
+          );
+        } else if (nextStatus === TRANSACTION_STATUS.REVISION) {
+          const reasonText = req.body.reason || "Revision Requested";
+          const detailsText = req.body.details || req.body.deliverable_note || req.body.note || "Client requested changes to deliverable.";
+
+          const [latestSubs] = await conn.query(
+            "SELECT id FROM milestone_submissions WHERE milestone_id = ? ORDER BY version DESC LIMIT 1",
+            [targetM.id]
+          );
+          const subId = latestSubs.length ? latestSubs[0].id : null;
+
+          await conn.query(
+            `INSERT INTO revision_requests (transaction_id, milestone_id, submission_id, requested_by, reason, details, status)
+             VALUES (?, ?, ?, ?, ?, ?, 'open')`,
+            [tx.id, targetM.id, subId, userId, reasonText, detailsText]
+          );
+
+          if (subId) {
+            await conn.query("UPDATE milestone_submissions SET status = 'revision_requested' WHERE id = ?", [subId]);
+          }
+
+          await conn.query("UPDATE milestones SET status = 'rejected' WHERE id = ?", [targetM.id]);
+        }
+      }
+
       await logTransactionEvent({
         conn,
         transactionId: tx.id,
@@ -806,7 +1166,7 @@ router.patch("/:id/status", async (req, res, next) => {
         action: action || "status_changed",
         fromStatus: previousStatus,
         toStatus: nextStatus,
-        note: ai_audit_note || null,
+        note: ai_audit_note || req.body.deliverable_note || null,
       });
     } catch (err) {
       await conn.rollback();
@@ -1194,9 +1554,26 @@ router.patch("/milestones/:id/status", async (req, res, next) => {
       return rollbackWithError(conn, res, 403, "Access denied.");
     }
 
-    // Validate the transition is actually allowed from the milestone's
-    // current status (approved/rejected/pending/paid/due are all locked
-    // except for the explicit "due -> submitted -> approved/rejected" path)
+    // Freeze milestone updates if transaction is disputed or completed/cancelled
+    if (tx.status === TRANSACTION_STATUS.DISPUTED) {
+      return rollbackWithError(conn, res, 400, "Transaction is currently under dispute.");
+    }
+
+    if ([TRANSACTION_STATUS.COMPLETED, TRANSACTION_STATUS.CANCELLED].includes(tx.status)) {
+      return rollbackWithError(conn, res, 400, `Transaction is already ${tx.status}.`);
+    }
+
+    // Prevent provider resubmitting while currently under review
+    if (status === MILESTONE_STATUS.SUBMITTED && tx.status === TRANSACTION_STATUS.INSPECTION && milestone.status === MILESTONE_STATUS.SUBMITTED) {
+      return rollbackWithError(conn, res, 400, "Submission is currently under review.");
+    }
+
+    // Prevent double approval
+    if (status === MILESTONE_STATUS.APPROVED && milestone.status === MILESTONE_STATUS.APPROVED) {
+      return rollbackWithError(conn, res, 400, "Milestone has already been approved.");
+    }
+
+    // Validate the transition is actually allowed from the milestone's current status
     const allowedNext = ALLOWED_MILESTONE_TRANSITIONS[milestone.status] || [];
     if (!allowedNext.includes(status)) {
       return rollbackWithError(
@@ -1207,11 +1584,6 @@ router.patch("/milestones/:id/status", async (req, res, next) => {
       );
     }
 
-    // Issue 5: submissions are immutable - a milestone that already has a
-    // deliverable note attached can't have it silently replaced. (In
-    // practice the transition table above already blocks re-submission
-    // since "submitted" only reaches here from "due", but this guards
-    // against that invariant changing later.)
     if (status === MILESTONE_STATUS.SUBMITTED && milestone.deliverable_note && milestone.status !== MILESTONE_STATUS.REJECTED) {
       return rollbackWithError(
         conn,
@@ -1244,8 +1616,33 @@ router.patch("/milestones/:id/status", async (req, res, next) => {
       );
     }
 
-    // A deliverable note may only be attached by the seller, when submitting
-    if (deliverableNote && userId !== tx.seller_id) {
+    // Require all milestones to be fully paid into escrow before releasing funds to provider
+    if (status === MILESTONE_STATUS.APPROVED) {
+      const [allTxMilestones] = await conn.query(
+        "SELECT * FROM milestones WHERE transaction_id = ? ORDER BY id ASC FOR UPDATE",
+        [tx.id]
+      );
+      const hasUnfundedMilestones = allTxMilestones.some(
+        (m) => m.id !== parseInt(milestoneId) && !["paid", "approved"].includes(m.status)
+      );
+
+      const totalEscrowFunded = parseFloat(tx.escrow_balance || 0) + parseFloat(tx.released_amount || 0);
+      const totalTransactionAmount = parseFloat(tx.amount || 0);
+
+      const allPaidIntoEscrow = !hasUnfundedMilestones && (totalTransactionAmount <= 0 || totalEscrowFunded >= totalTransactionAmount - 0.01);
+
+      if (!allPaidIntoEscrow) {
+        return rollbackWithError(
+          conn,
+          res,
+          400,
+          "All milestones must be fully funded into escrow before releasing funds to the service provider."
+        );
+      }
+    }
+
+    // A deliverable note may only be attached by the seller when submitting a milestone deliverable
+    if (deliverableNote && status === MILESTONE_STATUS.SUBMITTED && userId !== tx.seller_id) {
       return rollbackWithError(
         conn,
         res,
@@ -1271,6 +1668,63 @@ router.patch("/milestones/:id/status", async (req, res, next) => {
       `UPDATE milestones SET ${fields.join(", ")} WHERE id = ?`,
       params,
     );
+
+    // Save milestone submission or revision request to dedicated history tables
+    if (status === MILESTONE_STATUS.SUBMITTED) {
+      const [subCount] = await conn.query(
+        "SELECT COUNT(*) as cnt FROM milestone_submissions WHERE milestone_id = ?",
+        [milestoneId]
+      );
+      const nextVer = (subCount[0]?.cnt || 0) + 1;
+      const noteText = deliverableNote || milestone.deliverable_note || "Deliverable submitted for review";
+
+      await conn.query(
+        `INSERT INTO milestone_submissions (transaction_id, milestone_id, submitted_by, version, deliverable_note, status)
+         VALUES (?, ?, ?, ?, ?, 'submitted')`,
+        [tx.id, milestoneId, userId, nextVer, noteText]
+      );
+
+      await conn.query(
+        "UPDATE revision_requests SET status = 'addressed' WHERE milestone_id = ? AND status = 'open'",
+        [milestoneId]
+      );
+
+      if (tx.status !== TRANSACTION_STATUS.INSPECTION) {
+        await conn.query("UPDATE transactions SET status = ? WHERE id = ?", [
+          TRANSACTION_STATUS.INSPECTION,
+          tx.id,
+        ]);
+      }
+    } else if (status === MILESTONE_STATUS.REJECTED) {
+      const reasonText = req.body.reason || "Revision Requested";
+      const detailsText = req.body.details || deliverableNote || "Client requested changes to milestone deliverable.";
+
+      const [latestSubs] = await conn.query(
+        "SELECT id FROM milestone_submissions WHERE milestone_id = ? ORDER BY version DESC LIMIT 1",
+        [milestoneId]
+      );
+      const subId = latestSubs.length ? latestSubs[0].id : null;
+
+      await conn.query(
+        `INSERT INTO revision_requests (transaction_id, milestone_id, submission_id, requested_by, reason, details, status)
+         VALUES (?, ?, ?, ?, ?, ?, 'open')`,
+        [tx.id, milestoneId, subId, userId, reasonText, detailsText]
+      );
+
+      if (subId) {
+        await conn.query("UPDATE milestone_submissions SET status = 'revision_requested' WHERE id = ?", [subId]);
+      }
+
+      await conn.query("UPDATE transactions SET status = ? WHERE id = ?", [
+        TRANSACTION_STATUS.REVISION,
+        tx.id,
+      ]);
+    } else if (status === MILESTONE_STATUS.APPROVED) {
+      await conn.query(
+        "UPDATE milestone_submissions SET status = 'approved' WHERE milestone_id = ? AND status = 'submitted'",
+        [milestoneId]
+      );
+    }
 
     await logTransactionEvent({
       conn,
@@ -1301,88 +1755,95 @@ router.patch("/milestones/:id/status", async (req, res, next) => {
     let autoCompletedTransaction = false;
 
     if (status === MILESTONE_STATUS.APPROVED) {
-      // Fetch all milestones for this transaction to verify full funding
-      const [allMilestones] = await conn.query(
-        "SELECT * FROM milestones WHERE transaction_id = ? ORDER BY id ASC FOR UPDATE",
-        [tx.id],
-      );
+      // 1. Release funds allocated for THIS milestone to seller wallet
+      const milestoneAmount = parseFloat(milestone.amount || 0);
+      const currentEscrow = parseFloat(tx.escrow_balance || 0);
+      const releaseAmount = Math.min(currentEscrow, milestoneAmount);
 
-      // Verify all milestones are completely paid into escrow before release can proceed
-      const hasUnpaidMilestones = allMilestones.some(
-        (m) =>
-          m.status === MILESTONE_STATUS.PENDING ||
-          m.status === MILESTONE_STATUS.UPCOMING ||
-          m.status === MILESTONE_STATUS.DUE,
-      );
-
-      const totalEscrowFunded =
-        parseFloat(tx.escrow_balance || 0) + parseFloat(tx.released_amount || 0);
-      const totalTransactionAmount = parseFloat(tx.amount || 0);
-
-      const allPaidIntoEscrow =
-        !hasUnpaidMilestones &&
-        (totalTransactionAmount <= 0 || totalEscrowFunded >= totalTransactionAmount - 0.01);
-
-      if (!allPaidIntoEscrow) {
-        return rollbackWithError(
-          conn,
-          res,
-          400,
-          "Accept & Release can only be completed when all milestones are fully paid into escrow.",
-        );
-      }
-
-      const totalReleaseAmount = parseFloat(tx.escrow_balance || 0);
-
-      if (totalReleaseAmount > 0) {
+      if (releaseAmount > 0) {
         sellerWalletResult = await releaseEscrow({
           conn,
           transaction: tx,
           recipientId: tx.seller_id,
-          amount: totalReleaseAmount,
+          amount: releaseAmount,
         });
 
         await logTransactionEvent({
           conn,
           transactionId: tx.id,
           userId,
-          action: "full_escrow_released",
-          note: `Released total escrow balance (${totalReleaseAmount}) to provider available balance`,
+          action: "milestone_escrow_released",
+          note: `Released escrow funds ($${releaseAmount}) for milestone "${milestone.title}" to provider balance`,
           metadata: {
+            milestoneId,
             sellerId: tx.seller_id,
-            amount: totalReleaseAmount,
+            amount: releaseAmount,
             walletId: sellerWalletResult.wallet.id,
           },
         });
       }
 
-      // Mark all milestones as approved
-      await conn.query("UPDATE milestones SET status = ? WHERE transaction_id = ?", [
-        MILESTONE_STATUS.APPROVED,
-        tx.id,
-      ]);
+      // 2. Query all milestones for transaction to check if ALL required milestones are approved
+      const [allMilestones] = await conn.query(
+        "SELECT * FROM milestones WHERE transaction_id = ? ORDER BY id ASC FOR UPDATE",
+        [tx.id],
+      );
 
-      // Complete transaction status
-      if (tx.status !== TRANSACTION_STATUS.COMPLETED) {
-        await updateTransactionStatus({
-          conn,
-          transaction: tx,
-          userId,
-          nextStatus: TRANSACTION_STATUS.COMPLETED,
-          action: "all_milestones_completed",
-        });
+      const allApproved = allMilestones.length > 0 && allMilestones.every((m) => m.status === MILESTONE_STATUS.APPROVED);
 
-        await logTransactionEvent({
-          conn,
-          transactionId: tx.id,
-          userId,
-          action: "transaction_completed",
-          fromStatus: tx.status,
-          toStatus: TRANSACTION_STATUS.COMPLETED,
-          note: "All escrow funds released. Transaction marked as completed.",
-        });
+      if (allApproved) {
+        // If final milestone approved, release any remaining escrow balance and mark COMPLETED
+        const remainingEscrow = parseFloat(tx.escrow_balance || 0);
+        if (remainingEscrow > 0) {
+          const extraRelease = await releaseEscrow({
+            conn,
+            transaction: tx,
+            recipientId: tx.seller_id,
+            amount: remainingEscrow,
+          });
+          if (!sellerWalletResult) sellerWalletResult = extraRelease;
+        }
 
-        autoCompletedTransaction = true;
+        if (tx.status !== TRANSACTION_STATUS.COMPLETED) {
+          await updateTransactionStatus({
+            conn,
+            transaction: tx,
+            userId,
+            nextStatus: TRANSACTION_STATUS.COMPLETED,
+            action: "all_milestones_completed",
+          });
+
+          await logTransactionEvent({
+            conn,
+            transactionId: tx.id,
+            userId,
+            action: "transaction_completed",
+            fromStatus: tx.status,
+            toStatus: TRANSACTION_STATUS.COMPLETED,
+            note: "All milestones approved and released. Transaction marked as completed.",
+          });
+
+          autoCompletedTransaction = true;
+        }
+      } else {
+        // Multi-milestone project: keep transaction active ('inprogress')
+        if (tx.status === TRANSACTION_STATUS.INSPECTION || tx.status === TRANSACTION_STATUS.AUDIT) {
+          await conn.query("UPDATE transactions SET status = ? WHERE id = ?", [
+            TRANSACTION_STATUS.INPROGRESS,
+            tx.id,
+          ]);
+        }
+
+        // Advance next milestone to 'upcoming' / 'due'
+        const nextMilestone = allMilestones.find(
+          (m) => m.status === MILESTONE_STATUS.PENDING
+        );
+        if (nextMilestone) {
+          await conn.query("UPDATE milestones SET status = ? WHERE id = ?", [
+            MILESTONE_STATUS.UPCOMING,
+            nextMilestone.id,
+          ]);
+        }
       }
     }
 
@@ -1627,10 +2088,7 @@ router.post("/milestones/:id/pay", async (req, res, next) => {
     );
     if (currentIdx !== -1 && currentIdx + 1 < allMilestones.length) {
       const nextMilestone = allMilestones[currentIdx + 1];
-      if (
-        nextMilestone.status === MILESTONE_STATUS.PENDING ||
-        nextMilestone.status === MILESTONE_STATUS.UPCOMING
-      ) {
+      if (nextMilestone.status === MILESTONE_STATUS.PENDING) {
         await conn.query("UPDATE milestones SET status = ? WHERE id = ?", [
           MILESTONE_STATUS.UPCOMING,
           nextMilestone.id,

@@ -27,6 +27,9 @@ export const NOTIFICATION_TYPE = Object.freeze({
   DISPUTE_FILED:    "dispute_filed",
   DISPUTE_RESOLVED: "dispute_resolved",
 
+  // Contract negotiation (pre-work)
+  CONTRACT_CHANGE_REQUESTED: "contract_change_requested",
+
   // Reviews
   REVIEW_RECEIVED: "review_received",
 

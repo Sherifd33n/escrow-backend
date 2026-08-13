@@ -1,6 +1,6 @@
 import express from "express";
 import authMiddleware from "../middleware/auth.js";
-import { generateAiScope, runAiAudit } from "../services/aiService.js";
+import { generateAiScope, runAiAudit, getTransactionAudits } from "../services/aiService.js";
 
 const router = express.Router();
 
@@ -37,10 +37,12 @@ router.post("/scope", async (req, res, next) => {
 // POST /api/ai/audit - Perform AI Deliverable Audit
 router.post("/audit", async (req, res, next) => {
   try {
-    const { transactionId, title, type, amount, currency, counterparty } = req.body;
+    const { transactionId, milestoneId, submissionId, title, type, amount, currency, counterparty } = req.body;
 
     const audit = await runAiAudit(req.user.id, {
       transactionId,
+      milestoneId,
+      submissionId,
       title: title || "Tech Services Project",
       type: type || "Software Dev",
       amount: parseFloat(amount) || 0,
@@ -61,6 +63,19 @@ router.post("/audit", async (req, res, next) => {
         aiAuditsUsed: error.aiAuditsUsed,
       });
     }
+    next(error);
+  }
+});
+
+// GET /api/ai/audits/:transactionId - Retrieve audit history for a transaction
+router.get("/audits/:transactionId", async (req, res, next) => {
+  try {
+    const audits = await getTransactionAudits(req.params.transactionId);
+    res.json({
+      success: true,
+      audits,
+    });
+  } catch (error) {
     next(error);
   }
 });

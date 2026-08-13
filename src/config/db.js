@@ -379,8 +379,18 @@ WHERE is_verified IS NULL;
       await conn.query("ALTER TABLE transactions ADD COLUMN `escrow_fee_amount` DECIMAL(15, 2) NOT NULL DEFAULT 0.00");
       console.log("Migration: Added transactions.escrow_fee_amount");
     }
+    const [ebCols] = await conn.query("SHOW COLUMNS FROM transactions LIKE 'escrow_balance'");
+    if (ebCols.length === 0) {
+      await conn.query("ALTER TABLE transactions ADD COLUMN `escrow_balance` DECIMAL(15, 2) NOT NULL DEFAULT 0.00");
+      console.log("Migration: Added transactions.escrow_balance");
+    }
+    const [raCols] = await conn.query("SHOW COLUMNS FROM transactions LIKE 'released_amount'");
+    if (raCols.length === 0) {
+      await conn.query("ALTER TABLE transactions ADD COLUMN `released_amount` DECIMAL(15, 2) NOT NULL DEFAULT 0.00");
+      console.log("Migration: Added transactions.released_amount");
+    }
   } catch (err) {
-    console.error("Migration failed for transaction fee columns:", err);
+    console.error("Migration failed for transaction fee/balance columns:", err);
   }
 
   // ----------------------------------------------------
@@ -472,6 +482,160 @@ WHERE is_verified IS NULL;
     console.log("Migration: Updated disputes.evidence and disputes.reason to LONGTEXT.");
   } catch (err) {
     console.error("Migration failed for disputes LONGTEXT columns:", err);
+  }
+
+  // ----------------------------------------------------
+  // TRANSACTIONS SCOPE & TIMELINE MIGRATIONS
+  // ----------------------------------------------------
+  const txScopeColumns = [
+    { name: "scope_json", definition: "JSON DEFAULT NULL" },
+    { name: "ai_estimated_timeline", definition: "VARCHAR(100) DEFAULT NULL" },
+    { name: "agreed_duration", definition: "VARCHAR(100) DEFAULT NULL" },
+    { name: "agreed_deadline", definition: "TIMESTAMP NULL DEFAULT NULL" },
+    { name: "revision_policy", definition: "VARCHAR(255) DEFAULT '2 rounds of minor revisions'" }
+  ];
+
+  for (const col of txScopeColumns) {
+    try {
+      const [rows] = await conn.query("SHOW COLUMNS FROM transactions LIKE ?", [col.name]);
+      if (rows.length === 0) {
+        await conn.query(`ALTER TABLE transactions ADD COLUMN \`${col.name}\` ${col.definition}`);
+        console.log(`Migration: Added transactions.${col.name}`);
+      }
+    } catch (err) {
+      console.error(`Migration failed for transactions.${col.name}`, err);
+    }
+  }
+
+  // ----------------------------------------------------
+  // MILESTONES EXTENSION MIGRATIONS
+  // ----------------------------------------------------
+  const milestoneColumns = [
+    { name: "description", definition: "TEXT DEFAULT NULL" },
+    { name: "ai_suggested_timeline", definition: "VARCHAR(100) DEFAULT NULL" },
+    { name: "start_date", definition: "TIMESTAMP NULL DEFAULT NULL" },
+    { name: "due_date", definition: "TIMESTAMP NULL DEFAULT NULL" }
+  ];
+
+  for (const col of milestoneColumns) {
+    try {
+      const [rows] = await conn.query("SHOW COLUMNS FROM milestones LIKE ?", [col.name]);
+      if (rows.length === 0) {
+        await conn.query(`ALTER TABLE milestones ADD COLUMN \`${col.name}\` ${col.definition}`);
+        console.log(`Migration: Added milestones.${col.name}`);
+      }
+    } catch (err) {
+      console.error(`Migration failed for milestones.${col.name}`, err);
+    }
+  }
+
+  // ----------------------------------------------------
+  // CREATE transaction_events TABLE
+  // ----------------------------------------------------
+  try {
+    await conn.query(`
+      CREATE TABLE IF NOT EXISTS \`transaction_events\` (
+        \`id\` INT AUTO_INCREMENT PRIMARY KEY,
+        \`transaction_id\` INT NOT NULL,
+        \`user_id\` INT NOT NULL,
+        \`action\` VARCHAR(100) NOT NULL,
+        \`from_status\` VARCHAR(50) DEFAULT NULL,
+        \`to_status\` VARCHAR(50) DEFAULT NULL,
+        \`note\` TEXT DEFAULT NULL,
+        \`metadata\` JSON DEFAULT NULL,
+        \`created_at\` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        INDEX \`idx_tx_events_tx\` (\`transaction_id\`),
+        FOREIGN KEY (\`transaction_id\`) REFERENCES \`transactions\` (\`id\`) ON DELETE CASCADE
+      ) ENGINE=InnoDB;
+    `);
+    console.log("Migration: transaction_events table checked/created.");
+  } catch (err) {
+    console.error("Migration failed to create transaction_events table:", err);
+  }
+
+  // ----------------------------------------------------
+  // CREATE milestone_submissions TABLE
+  // ----------------------------------------------------
+  try {
+    await conn.query(`
+      CREATE TABLE IF NOT EXISTS \`milestone_submissions\` (
+        \`id\` INT AUTO_INCREMENT PRIMARY KEY,
+        \`transaction_id\` INT NOT NULL,
+        \`milestone_id\` INT NOT NULL,
+        \`submitted_by\` INT NOT NULL,
+        \`version\` INT NOT NULL DEFAULT 1,
+        \`deliverable_note\` TEXT NOT NULL,
+        \`attachments\` JSON DEFAULT NULL,
+        \`status\` VARCHAR(50) NOT NULL DEFAULT 'submitted',
+        \`created_at\` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        \`updated_at\` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX \`idx_m_sub_tx_m\` (\`transaction_id\`, \`milestone_id\`),
+        FOREIGN KEY (\`transaction_id\`) REFERENCES \`transactions\` (\`id\`) ON DELETE CASCADE,
+        FOREIGN KEY (\`milestone_id\`) REFERENCES \`milestones\` (\`id\`) ON DELETE CASCADE,
+        FOREIGN KEY (\`submitted_by\`) REFERENCES \`users\` (\`id\`) ON DELETE CASCADE
+      ) ENGINE=InnoDB;
+    `);
+    console.log("Migration: milestone_submissions table checked/created.");
+  } catch (err) {
+    console.error("Migration failed to create milestone_submissions table:", err);
+  }
+
+  // ----------------------------------------------------
+  // CREATE revision_requests TABLE
+  // ----------------------------------------------------
+  try {
+    await conn.query(`
+      CREATE TABLE IF NOT EXISTS \`revision_requests\` (
+        \`id\` INT AUTO_INCREMENT PRIMARY KEY,
+        \`transaction_id\` INT NOT NULL,
+        \`milestone_id\` INT NOT NULL,
+        \`submission_id\` INT DEFAULT NULL,
+        \`requested_by\` INT NOT NULL,
+        \`reason\` VARCHAR(255) DEFAULT NULL,
+        \`details\` TEXT NOT NULL,
+        \`status\` VARCHAR(50) NOT NULL DEFAULT 'open',
+        \`created_at\` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        \`updated_at\` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX \`idx_rev_req_tx_m\` (\`transaction_id\`, \`milestone_id\`),
+        FOREIGN KEY (\`transaction_id\`) REFERENCES \`transactions\` (\`id\`) ON DELETE CASCADE,
+        FOREIGN KEY (\`milestone_id\`) REFERENCES \`milestones\` (\`id\`) ON DELETE CASCADE,
+        FOREIGN KEY (\`requested_by\`) REFERENCES \`users\` (\`id\`) ON DELETE CASCADE
+      ) ENGINE=InnoDB;
+    `);
+    console.log("Migration: revision_requests table checked/created.");
+  } catch (err) {
+    console.error("Migration failed to create revision_requests table:", err);
+  }
+
+  // ----------------------------------------------------
+  // CREATE ai_audits TABLE
+  // ----------------------------------------------------
+  try {
+    await conn.query(`
+      CREATE TABLE IF NOT EXISTS \`ai_audits\` (
+        \`id\` INT AUTO_INCREMENT PRIMARY KEY,
+        \`transaction_id\` INT NOT NULL,
+        \`milestone_id\` INT DEFAULT NULL,
+        \`submission_id\` INT DEFAULT NULL,
+        \`audited_by\` INT NOT NULL,
+        \`score\` INT NOT NULL DEFAULT 0,
+        \`status\` VARCHAR(50) NOT NULL,
+        \`risk\` VARCHAR(50) NOT NULL,
+        \`risk_score\` INT NOT NULL DEFAULT 0,
+        \`summary\` TEXT NOT NULL,
+        \`recommendation\` TEXT NOT NULL,
+        \`checks_json\` JSON DEFAULT NULL,
+        \`created_at\` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        INDEX \`idx_ai_audits_tx\` (\`transaction_id\`),
+        INDEX \`idx_ai_audits_m\` (\`milestone_id\`),
+        INDEX \`idx_ai_audits_sub\` (\`submission_id\`),
+        FOREIGN KEY (\`transaction_id\`) REFERENCES \`transactions\` (\`id\`) ON DELETE CASCADE,
+        FOREIGN KEY (\`audited_by\`) REFERENCES \`users\` (\`id\`) ON DELETE CASCADE
+      ) ENGINE=InnoDB;
+    `);
+    console.log("Migration: ai_audits table checked/created.");
+  } catch (err) {
+    console.error("Migration failed to create ai_audits table:", err);
   }
 }
 
