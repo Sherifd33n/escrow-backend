@@ -7,6 +7,8 @@ const groq = new OpenAI({
   baseURL: "https://api.groq.com/openai/v1",
 });
 
+const GROQ_MODEL = process.env.GROQ_MODEL || "openai/gpt-oss-120b";
+
 console.log("Groq API key loaded:", process.env.GROQ_API_KEY ? "YES" : "NO");
 
 /**
@@ -67,7 +69,7 @@ export async function generateAiScope(userId, { categoryLabel, description }) {
 
   try {
     const response = await groq.chat.completions.create({
-      model: "llama-3.3-70b-versatile",
+      model: GROQ_MODEL,
 
       temperature: 0.2,
 
@@ -222,7 +224,7 @@ ${description}
       JSON.stringify({
         categoryLabel,
         provider: "groq",
-        model: "llama-3.3-70b-versatile",
+        model: GROQ_MODEL,
       }),
     ],
   );
@@ -334,7 +336,7 @@ export async function runAiAudit(
 
   try {
     const response = await groq.chat.completions.create({
-      model: "llama-3.3-70b-versatile",
+      model: GROQ_MODEL,
       temperature: 0.1,
       messages: [
         {
@@ -487,7 +489,7 @@ actually exists in the supplied information.
         title,
         score: auditResult.score,
         provider: "groq",
-        model: "llama-3.3-70b-versatile",
+        model: GROQ_MODEL,
       }),
     ],
   );
