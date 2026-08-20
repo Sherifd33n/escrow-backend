@@ -175,6 +175,26 @@ CREATE TABLE IF NOT EXISTS `milestones` (
   FOREIGN KEY (`transaction_id`) REFERENCES `transactions` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB;
 
+-- Milestone Submissions table
+CREATE TABLE IF NOT EXISTS `milestone_submissions` (
+  `id` INT AUTO_INCREMENT PRIMARY KEY,
+  `transaction_id` INT NOT NULL,
+  `milestone_id` INT NOT NULL,
+  `submitted_by` INT NOT NULL,
+  `version` INT NOT NULL DEFAULT 1,
+  `deliverable_note` TEXT NOT NULL,
+  `attachments` JSON DEFAULT NULL,
+  `category` VARCHAR(50) DEFAULT NULL,
+  `submission_data` JSON DEFAULT NULL,
+  `status` VARCHAR(50) NOT NULL DEFAULT 'submitted',
+  `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX `idx_m_sub_tx_m` (`transaction_id`, `milestone_id`),
+  FOREIGN KEY (`transaction_id`) REFERENCES `transactions` (`id`) ON DELETE CASCADE,
+  FOREIGN KEY (`milestone_id`) REFERENCES `milestones` (`id`) ON DELETE CASCADE,
+  FOREIGN KEY (`submitted_by`) REFERENCES `users` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
 -- Wallet transactions (history) table
 CREATE TABLE IF NOT EXISTS `wallet_transactions` (
   `id` INT AUTO_INCREMENT PRIMARY KEY,

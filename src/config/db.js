@@ -566,6 +566,8 @@ WHERE is_verified IS NULL;
         \`version\` INT NOT NULL DEFAULT 1,
         \`deliverable_note\` TEXT NOT NULL,
         \`attachments\` JSON DEFAULT NULL,
+        \`category\` VARCHAR(50) DEFAULT NULL,
+        \`submission_data\` JSON DEFAULT NULL,
         \`status\` VARCHAR(50) NOT NULL DEFAULT 'submitted',
         \`created_at\` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         \`updated_at\` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -579,6 +581,27 @@ WHERE is_verified IS NULL;
   } catch (err) {
     console.error("Migration failed to create milestone_submissions table:", err);
   }
+
+  // ----------------------------------------------------
+  // MILESTONE_SUBMISSIONS EXTENSION MIGRATION
+  // ----------------------------------------------------
+  const subDataColumns = [
+    { name: "category", definition: "VARCHAR(50) DEFAULT NULL" },
+    { name: "submission_data", definition: "JSON DEFAULT NULL" }
+  ];
+
+  for (const col of subDataColumns) {
+    try {
+      const [rows] = await conn.query("SHOW COLUMNS FROM milestone_submissions LIKE ?", [col.name]);
+      if (rows.length === 0) {
+        await conn.query(`ALTER TABLE milestone_submissions ADD COLUMN \`${col.name}\` ${col.definition}`);
+        console.log(`Migration: Added milestone_submissions.${col.name}`);
+      }
+    } catch (err) {
+      console.error(`Migration failed for milestone_submissions.${col.name}`, err);
+    }
+  }
+
 
   // ----------------------------------------------------
   // CREATE revision_requests TABLE

@@ -7,6 +7,10 @@ import { updateTransactionStatus } from "../services/transactionService.js";
 import { logTransactionEvent } from "../services/transactionEventService.js";
 import { notify } from "../services/notificationService.js";
 import { NOTIFICATION_TYPE } from "../constants/notificationTypes.js";
+import multer from "multer";
+import path from "path";
+import { fileURLToPath } from "url";
+import fs from "fs";
 
 const router = express.Router();
 
@@ -20,6 +24,8 @@ import {
   refundEscrow,
 } from "../services/walletService.js";
 import { resolveDispute } from "../services/disputeService.js";
+import { validateSubmissionData } from "../core/submissionValidator.js";
+import { normalizeCategory } from "../constants/serviceCategories.js";
 
 // Apply auth middleware to all routes in this router
 router.use(authMiddleware);
@@ -231,6 +237,14 @@ async function populateMilestoneDetails(milestones) {
       db.query("SELECT * FROM milestone_submissions WHERE milestone_id IN (?) ORDER BY version ASC", [mIds]),
       db.query("SELECT * FROM revision_requests WHERE milestone_id IN (?) ORDER BY created_at ASC", [mIds]),
     ]);
+
+    submissions.forEach((s) => {
+      if (typeof s.submission_data === "string") {
+        try {
+          s.submission_data = JSON.parse(s.submission_data);
+        } catch (e) {}
+      }
+    });
 
     milestones.forEach((m) => {
       m.submissions = submissions.filter((s) => s.milestone_id === m.id);
@@ -1114,6 +1128,15 @@ router.patch("/:id/status", async (req, res, next) => {
 
       if (targetM) {
         if (nextStatus === TRANSACTION_STATUS.INSPECTION) {
+          const { submission_data } = req.body;
+          let valResult = { valid: true, data: null };
+          if (submission_data !== undefined && submission_data !== null) {
+            valResult = validateSubmissionData(submission_data, tx.category);
+            if (!valResult.valid) {
+              return rollbackWithError(conn, res, 400, valResult.message);
+            }
+          }
+
           const [subCount] = await conn.query(
             "SELECT COUNT(*) as cnt FROM milestone_submissions WHERE milestone_id = ?",
             [targetM.id]
@@ -1121,10 +1144,16 @@ router.patch("/:id/status", async (req, res, next) => {
           const nextVer = (subCount[0]?.cnt || 0) + 1;
           const noteText = req.body.deliverable_note || req.body.note || targetM.deliverable_note || "Deliverable submitted for review";
 
+          const parsedSubData = valResult.data;
+          const subCategory = parsedSubData?.category
+            ? normalizeCategory(parsedSubData.category)
+            : (normalizeCategory(tx.category) || tx.category);
+          const subDataJson = parsedSubData ? JSON.stringify(parsedSubData) : null;
+
           await conn.query(
-            `INSERT INTO milestone_submissions (transaction_id, milestone_id, submitted_by, version, deliverable_note, status)
-             VALUES (?, ?, ?, ?, ?, 'submitted')`,
-            [tx.id, targetM.id, userId, nextVer, noteText]
+            `INSERT INTO milestone_submissions (transaction_id, milestone_id, submitted_by, version, deliverable_note, category, submission_data, status)
+             VALUES (?, ?, ?, ?, ?, ?, ?, 'submitted')`,
+            [tx.id, targetM.id, userId, nextVer, noteText, subCategory, subDataJson]
           );
 
           await conn.query(
@@ -1470,7 +1499,7 @@ router.post("/:id/milestones", async (req, res, next) => {
 // 6. PATCH /milestones/:id/status - Update milestone status
 router.patch("/milestones/:id/status", async (req, res, next) => {
   const milestoneId = req.params.id;
-  const { status, deliverable_note } = req.body;
+  const { status, deliverable_note, submission_data } = req.body;
   const userId = req.user.id;
 
   if (!status) {
@@ -1641,14 +1670,22 @@ router.patch("/milestones/:id/status", async (req, res, next) => {
       }
     }
 
-    // A deliverable note may only be attached by the seller when submitting a milestone deliverable
-    if (deliverableNote && status === MILESTONE_STATUS.SUBMITTED && userId !== tx.seller_id) {
+    // A deliverable note or submission_data may only be attached by the seller when submitting a milestone deliverable
+    if ((deliverableNote || submission_data) && status === MILESTONE_STATUS.SUBMITTED && userId !== tx.seller_id) {
       return rollbackWithError(
         conn,
         res,
         403,
         "Only the seller can upload a deliverable.",
       );
+    }
+
+    let valResult = { valid: true, data: null };
+    if (status === MILESTONE_STATUS.SUBMITTED && submission_data !== undefined && submission_data !== null) {
+      valResult = validateSubmissionData(submission_data, tx.category);
+      if (!valResult.valid) {
+        return rollbackWithError(conn, res, 400, valResult.message);
+      }
     }
 
     const fields = [];
@@ -1678,10 +1715,16 @@ router.patch("/milestones/:id/status", async (req, res, next) => {
       const nextVer = (subCount[0]?.cnt || 0) + 1;
       const noteText = deliverableNote || milestone.deliverable_note || "Deliverable submitted for review";
 
+      const parsedSubData = valResult.data;
+      const subCategory = parsedSubData?.category
+        ? normalizeCategory(parsedSubData.category)
+        : (normalizeCategory(tx.category) || tx.category);
+      const subDataJson = parsedSubData ? JSON.stringify(parsedSubData) : null;
+
       await conn.query(
-        `INSERT INTO milestone_submissions (transaction_id, milestone_id, submitted_by, version, deliverable_note, status)
-         VALUES (?, ?, ?, ?, ?, 'submitted')`,
-        [tx.id, milestoneId, userId, nextVer, noteText]
+        `INSERT INTO milestone_submissions (transaction_id, milestone_id, submitted_by, version, deliverable_note, category, submission_data, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'submitted')`,
+        [tx.id, milestoneId, userId, nextVer, noteText, subCategory, subDataJson]
       );
 
       await conn.query(
@@ -2630,6 +2673,63 @@ router.get("/:id/review", async (req, res, next) => {
     return res.json(reviews);
   } catch (error) {
     next(error);
+  }
+});
+
+
+// ─── Evidence File Upload ──────────────────────────────────────────────────
+const __dirname_tx = path.dirname(fileURLToPath(import.meta.url));
+
+const evidenceStorage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const uploadDir = path.join(__dirname_tx, "../../uploads/evidence");
+    if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
+    cb(null, uploadDir);
+  },
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    const uniqueName = `${Date.now()}_${crypto.randomBytes(6).toString("hex")}${ext}`;
+    cb(null, uniqueName);
+  },
+});
+
+const evidenceUpload = multer({
+  storage: evidenceStorage,
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB
+  fileFilter: (req, file, cb) => {
+    const allowedMimes = [
+      "image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml",
+      "application/pdf",
+      "application/zip", "application/x-zip-compressed",
+      "text/plain", "text/markdown",
+    ];
+    if (allowedMimes.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error(`File type not allowed: ${file.mimetype}`));
+    }
+  },
+});
+
+/**
+ * POST /api/transactions/evidence/upload
+ * Upload a file as submission evidence. Returns a public URL.
+ * Allowed: images (PNG/JPG/GIF/WebP/SVG), PDF, ZIP, TXT, Markdown
+ */
+router.post("/evidence/upload", evidenceUpload.single("file"), async (req, res, next) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: "No file uploaded." });
+    }
+    const publicUrl = `/uploads/evidence/${req.file.filename}`;
+    return res.json({
+      url: publicUrl,
+      original_name: req.file.originalname,
+      size: req.file.size,
+      mime_type: req.file.mimetype,
+    });
+  } catch (err) {
+    next(err);
   }
 });
 
