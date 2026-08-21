@@ -26,6 +26,7 @@ import {
 import { resolveDispute } from "../services/disputeService.js";
 import { validateSubmissionData } from "../core/submissionValidator.js";
 import { normalizeCategory } from "../constants/serviceCategories.js";
+import { hydrateScope, lockScope } from "../services/scopeService.js";
 
 // Apply auth middleware to all routes in this router
 router.use(authMiddleware);
@@ -833,6 +834,12 @@ router.patch("/:id/scope", async (req, res, next) => {
       },
     }).catch(err => console.error("Notification dispatch error:", err));
 
+    // Stage 1: hydrate relational scope tables from the saved scope_json
+    // Runs fire-and-forget; any error is logged but must not break the response.
+    hydrateScope(transactionId, scope_json).catch((err) =>
+      console.error("[scopeService] hydrateScope error after scope PATCH:", err)
+    );
+
     // Return updated transaction
     const updated = await db.query(
       `SELECT t.*, u_buyer.name as buyer_name, u_seller.name as seller_name
@@ -1186,6 +1193,10 @@ router.patch("/:id/status", async (req, res, next) => {
 
           await conn.query("UPDATE milestones SET status = 'rejected' WHERE id = ?", [targetM.id]);
         }
+      }
+
+      if (nextStatus === TRANSACTION_STATUS.INPROGRESS) {
+        await lockScope(tx.id, conn);
       }
 
       await logTransactionEvent({

@@ -13,6 +13,7 @@ import exchangeRateRoutes from "./routes/exchangeRate.js";
 import notificationsRoutes from "./routes/notifications.js";
 import subscriptionsRoutes from "./routes/subscriptions.js";
 import aiRoutes from "./routes/ai.js";
+import auditJobsRoutes from "./routes/auditJobs.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -94,6 +95,7 @@ app.use("/api/notifications", notificationsRoutes);
 // Subscriptions & AI
 app.use("/api/subscriptions", subscriptionsRoutes);
 app.use("/api/ai", aiRoutes);
+app.use("/api/audit-jobs", auditJobsRoutes);
 
 // Error handling
 app.use(errorHandler);
