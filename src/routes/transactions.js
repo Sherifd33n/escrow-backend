@@ -234,9 +234,10 @@ async function populateMilestoneDetails(milestones) {
   const mIds = milestones.map((m) => m.id);
 
   try {
-    const [submissions, revisions] = await Promise.all([
+    const [submissions, revisions, evidenceItems] = await Promise.all([
       db.query("SELECT * FROM milestone_submissions WHERE milestone_id IN (?) ORDER BY version ASC", [mIds]),
       db.query("SELECT * FROM revision_requests WHERE milestone_id IN (?) ORDER BY created_at ASC", [mIds]),
+      db.query("SELECT * FROM evidence_items WHERE milestone_id IN (?) ORDER BY id ASC", [mIds]),
     ]);
 
     submissions.forEach((s) => {
@@ -250,6 +251,7 @@ async function populateMilestoneDetails(milestones) {
     milestones.forEach((m) => {
       m.submissions = submissions.filter((s) => s.milestone_id === m.id);
       m.revision_requests = revisions.filter((r) => r.milestone_id === m.id);
+      m.evidence_items = evidenceItems.filter((e) => e.milestone_id === m.id);
     });
   } catch (err) {
     console.error("Error populating milestone details:", err);

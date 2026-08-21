@@ -115,7 +115,7 @@ export async function runAuditPipeline(
     return {
       name: req.scope_name || req.criterion_id,
       status: checkStatus,
-      note: res?.reason || dCheck?.facts?.[0] || "Requirement checked against Stage 2 evidence.",
+      note: res?.reason || dCheck?.facts?.[0] || "Requirement checked against submitted evidence.",
     };
   });
 

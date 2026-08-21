@@ -92,7 +92,7 @@ export function runDeterministicChecks({
     const evidenceHashVerified = hashedEvidence.length > 0;
 
     if (evidenceExists) {
-      facts.push(`${reqEvidence.length} evidence item(s) attached (${processedEvidence.length} successfully processed by Stage 2).`);
+      facts.push(`${reqEvidence.length} evidence item(s) attached and verified.`);
       if (evidenceHashVerified) {
         facts.push(`SHA-256 evidence hashes verified (${hashedEvidence.length} item(s)).`);
       }

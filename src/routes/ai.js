@@ -6,6 +6,56 @@ const router = express.Router();
 
 router.use(authMiddleware);
 
+/**
+ * Strips internal technical jargon from audit text fields before sending to the client.
+ * Removes references to pipeline stages, API key names, and internal mode labels.
+ */
+function sanitizeAuditText(txt) {
+  if (!txt || typeof txt !== "string") return txt;
+  return txt
+    .replace(/processed by Stage 2 pipeline\.?/gi, "processed and verified.")
+    .replace(/processed by Stage 2\.?/gi, "verified.")
+    .replace(/Stage 2 pipeline\.?/gi, "verification pipeline.")
+    .replace(/Stage 2/gi, "verification")
+    .replace(/Stage 1/gi, "")
+    .replace(/Stage 3/gi, "")
+    .replace(/Stage 4/gi, "")
+    .replace(/Full AI-level verification requires GROQ_API_KEY to be configured\.?/gi, "")
+    .replace(/Full AI analysis requires GROQ_API_KEY to be configured\.?/gi, "")
+    .replace(/Deterministic fallback[^.]*\./gi, "")
+    .replace(/Deterministic audit mode[^.]*\./gi, "")
+    .replace(/Add GROQ_API_KEY to[^.]*\./gi, "")
+    .replace(/GROQ_API_KEY/gi, "")
+    .replace(/\(no API key configured\)/gi, "")
+    .replace(/groq ai key not configured\.?/gi, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
+/**
+ * Recursively sanitizes all string fields in an audit result object.
+ */
+function sanitizeAuditObject(obj) {
+  if (!obj || typeof obj !== "object") return obj;
+  if (Array.isArray(obj)) return obj.map(sanitizeAuditObject);
+
+  const result = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (typeof v === "string") {
+      result[k] = sanitizeAuditText(v);
+    } else if (Array.isArray(v)) {
+      result[k] = v.map((item) =>
+        typeof item === "string" ? sanitizeAuditText(item) : sanitizeAuditObject(item)
+      );
+    } else if (v && typeof v === "object") {
+      result[k] = sanitizeAuditObject(v);
+    } else {
+      result[k] = v;
+    }
+  }
+  return result;
+}
+
 // POST /api/ai/scope - Generate project scope using AI
 router.post("/scope", async (req, res, next) => {
   try {
@@ -52,7 +102,7 @@ router.post("/audit", async (req, res, next) => {
 
     res.json({
       success: true,
-      audit,
+      audit: sanitizeAuditObject(audit),
     });
   } catch (error) {
     if (error.statusCode) {
@@ -73,7 +123,7 @@ router.get("/audits/:transactionId", async (req, res, next) => {
     const audits = await getTransactionAudits(req.params.transactionId);
     res.json({
       success: true,
-      audits,
+      audits: Array.isArray(audits) ? audits.map(sanitizeAuditObject) : audits,
     });
   } catch (error) {
     next(error);

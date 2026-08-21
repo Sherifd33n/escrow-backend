@@ -5,11 +5,11 @@ import { getScopeItems } from "./scopeService.js";
 import { runAuditPipeline } from "./audit/auditOrchestrator.js";
 
 const groq = new OpenAI({
-  apiKey: process.env.GROQ_API_KEY || "",
+  apiKey: process.env.GROQ_API_KEY || "dummy_groq_key",
   baseURL: "https://api.groq.com/openai/v1",
 });
 
-const GROQ_MODEL = process.env.GROQ_MODEL || "openai/gpt-oss-120b";
+const GROQ_MODEL = process.env.GROQ_MODEL || "groq/compound-mini";
 
 console.log("Groq API key loaded:", process.env.GROQ_API_KEY ? "YES" : "NO");
 
