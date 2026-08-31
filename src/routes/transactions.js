@@ -697,43 +697,88 @@ router.patch("/:id/scope", async (req, res, next) => {
     return res.status(400).json({ error: "scope_json (object) is required." });
   }
 
+  const conn = await db.getPool().getConnection();
   try {
-    const transactionId = await resolveTransactionId(req.params.id);
-    if (!transactionId) return res.status(404).json({ error: "Transaction not found." });
+    await conn.beginTransaction();
 
-    const txs = await db.query("SELECT * FROM transactions WHERE id = ?", [transactionId]);
-    if (!txs.length) return res.status(404).json({ error: "Transaction not found." });
+    const transactionId = await resolveTransactionId(req.params.id);
+    if (!transactionId) {
+      await conn.rollback();
+      return res.status(404).json({ error: "Transaction not found." });
+    }
+
+    const [txs] = await conn.query(
+      "SELECT * FROM transactions WHERE id = ? FOR UPDATE",
+      [transactionId]
+    );
+    if (!txs.length) {
+      await conn.rollback();
+      return res.status(404).json({ error: "Transaction not found." });
+    }
 
     const tx = txs[0];
 
     // Only the buyer (client) may attach/update scope
     if (tx.buyer_id !== userId) {
+      await conn.rollback();
       return res.status(403).json({ error: "Only the client (buyer) can attach a scope to a transaction." });
+    }
+
+    // Check existing milestones in DB FOR UPDATE
+    const [dbMilestones] = await conn.query(
+      "SELECT * FROM milestones WHERE transaction_id = ? ORDER BY id ASC FOR UPDATE",
+      [transactionId]
+    );
+
+    const hasPaidOrApproved = dbMilestones.some(m => ["paid", "approved"].includes(m.status));
+    const isFunded = tx.status !== TRANSACTION_STATUS.PENDING ||
+                     hasPaidOrApproved ||
+                     parseFloat(tx.escrow_balance || 0) > 0 ||
+                     parseFloat(tx.released_amount || 0) > 0;
+
+    // -------------------------------------------------------------------------
+    // REJECT CONTRACT/SCOPE MODIFICATIONS ON FUNDED TRANSACTIONS
+    // -------------------------------------------------------------------------
+    if (isFunded) {
+      await conn.rollback();
+      return res.status(400).json({
+        error: "Funded transactions cannot be modified.",
+      });
     }
 
     const scopeStr = JSON.stringify(scope_json);
     const estimatedTimeline = ai_estimated_timeline || scope_json.timeline || null;
     const revPolicy = revision_policy || scope_json.revisions || "2 revisions included per milestone";
 
-    // Extract title, category, and amount from scope_json or body if updated by client
+    // Extract title, category, and amount
     const newTitle = (scope_json.title && typeof scope_json.title === "string" && scope_json.title.trim())
       ? scope_json.title.trim()
       : tx.title;
-    const newCategory = (scope_json.category && typeof scope_json.category === "string" && scope_json.category.trim())
-      ? scope_json.category.trim()
-      : tx.category;
 
-    const reqAmount = req.body.amount !== undefined ? parseFloat(req.body.amount) : (scope_json?.amount !== undefined ? parseFloat(scope_json.amount) : null);
-    const totalAmount = (reqAmount !== null && !isNaN(reqAmount) && reqAmount > 0) ? reqAmount : parseFloat(tx.amount || 0);
+    const newCategory = isFunded
+      ? tx.category
+      : ((scope_json.category && typeof scope_json.category === "string" && scope_json.category.trim())
+          ? scope_json.category.trim()
+          : tx.category);
+
+    const reqAmount = req.body.amount !== undefined
+      ? parseFloat(req.body.amount)
+      : (scope_json?.amount !== undefined ? parseFloat(scope_json.amount) : null);
+
+    const totalAmount = isFunded
+      ? parseFloat(tx.amount || 0)
+      : ((reqAmount !== null && !isNaN(reqAmount) && reqAmount > 0) ? reqAmount : parseFloat(tx.amount || 0));
 
     const scopeMilestones = Array.isArray(scope_json.milestones) ? scope_json.milestones : [];
-    const count = scopeMilestones.length > 0 ? scopeMilestones.length : (tx.milestones_count || 1);
+    const count = isFunded
+      ? (tx.milestones_count || dbMilestones.length || 1)
+      : (scopeMilestones.length > 0 ? scopeMilestones.length : (tx.milestones_count || 1));
 
     // Recalculate escrow fee amount based on rate and updated total amount
-    const escrowFeeRate = parseFloat(tx.escrow_fee_rate || 0.05);
+    const escrowFeeRate = parseFloat(tx.escrow_fee_rate || 0.035);
     const escrowFeeAmount = Number((totalAmount * escrowFeeRate).toFixed(2));
 
-    await db.query(
+    await conn.query(
       `UPDATE transactions SET
         title = ?,
         category = ?,
@@ -761,17 +806,9 @@ router.patch("/:id/scope", async (req, res, next) => {
       ]
     );
 
-    // Check existing milestones in DB
-    const dbMilestones = await db.query(
-      "SELECT * FROM milestones WHERE transaction_id = ? ORDER BY id ASC",
-      [transactionId]
-    );
-
-    const hasPaidOrApproved = dbMilestones.some(m => ["paid", "approved"].includes(m.status));
-
-    if (!hasPaidOrApproved && scopeMilestones.length > 0) {
+    if (!isFunded && !hasPaidOrApproved && scopeMilestones.length > 0) {
       // Pre-funding phase: recreate milestones to match the updated scope breakdown count & details
-      await db.query("DELETE FROM milestones WHERE transaction_id = ?", [transactionId]);
+      await conn.query("DELETE FROM milestones WHERE transaction_id = ?", [transactionId]);
 
       const baseAmount = Number((totalAmount / count).toFixed(2));
       let remaining = totalAmount;
@@ -785,7 +822,7 @@ router.patch("/:id/scope", async (req, res, next) => {
         const milestoneDesc = mScope?.description || null;
         const milestoneTimeline = mScope?.timeline || null;
 
-        await db.query(
+        await conn.query(
           `INSERT INTO milestones
            (transaction_id, title, amount, status, description, ai_suggested_timeline)
            VALUES (?, ?, ?, ?, ?, ?)`,
@@ -800,11 +837,11 @@ router.patch("/:id/scope", async (req, res, next) => {
         );
       }
     } else if (scopeMilestones.length > 0) {
-      // Work/paid in progress: update titles/descriptions/timelines without disturbing paid status
+      // Work/paid in progress: update titles/descriptions/timelines without disturbing paid status or amounts
       for (let i = 0; i < Math.min(scopeMilestones.length, dbMilestones.length); i++) {
         const sm = scopeMilestones[i];
         const dm = dbMilestones[i];
-        await db.query(
+        await conn.query(
           `UPDATE milestones SET title = ?, description = ?, ai_suggested_timeline = ? WHERE id = ?`,
           [sm.name || dm.title, sm.description || null, sm.timeline || null, dm.id]
         );
@@ -812,23 +849,20 @@ router.patch("/:id/scope", async (req, res, next) => {
     }
 
     // Log transaction event
-    const conn = await db.getPool().getConnection();
-    try {
-      await logTransactionEvent({
-        conn,
-        transactionId: tx.id,
-        userId,
-        action: "contract_scope_updated",
-        note: "Contract scope and milestone breakdown updated by client.",
-        metadata: {
-          updatedBy: userId,
-          milestonesCount: count,
-          escrowFeeAmount,
-        },
-      });
-    } finally {
-      conn.release();
-    }
+    await logTransactionEvent({
+      conn,
+      transactionId: tx.id,
+      userId,
+      action: "contract_scope_updated",
+      note: "Contract scope and milestone breakdown updated by client.",
+      metadata: {
+        updatedBy: userId,
+        milestonesCount: count,
+        escrowFeeAmount,
+      },
+    });
+
+    await conn.commit();
 
     // Notify provider (seller) that contract scope was updated
     notify({
@@ -859,7 +893,7 @@ router.patch("/:id/scope", async (req, res, next) => {
     );
 
     // Return updated transaction
-    const updated = await db.query(
+    const updatedRows = await db.query(
       `SELECT t.*, u_buyer.name as buyer_name, u_seller.name as seller_name
        FROM transactions t
        JOIN users u_buyer ON t.buyer_id = u_buyer.id
@@ -871,11 +905,17 @@ router.patch("/:id/scope", async (req, res, next) => {
       "SELECT * FROM milestones WHERE transaction_id = ? ORDER BY id ASC",
       [transactionId]
     );
-    updated[0].milestones = milestones;
+    if (updatedRows && updatedRows.length > 0) {
+      updatedRows[0].milestones = milestones;
+      return res.json({ success: true, transaction: updatedRows[0] });
+    }
 
-    res.json({ success: true, transaction: updated[0] });
+    res.json({ success: true, transaction: null });
   } catch (error) {
+    await conn.rollback();
     next(error);
+  } finally {
+    conn.release();
   }
 });
 
@@ -1462,10 +1502,15 @@ router.post("/:id/milestones", async (req, res, next) => {
 
     // Milestones can't be added once funding has begun
     const [paidCheck] = await conn.query(
-      "SELECT COUNT(*) as cnt FROM milestones WHERE transaction_id = ? AND status = ?",
-      [transactionId, MILESTONE_STATUS.PAID],
+      "SELECT COUNT(*) as cnt FROM milestones WHERE transaction_id = ? AND status IN (?, ?)",
+      [transactionId, MILESTONE_STATUS.PAID, MILESTONE_STATUS.APPROVED],
     );
-    if (paidCheck[0].cnt > 0) {
+    const isFunded = tx.status !== TRANSACTION_STATUS.PENDING ||
+                     paidCheck[0].cnt > 0 ||
+                     parseFloat(tx.escrow_balance || 0) > 0 ||
+                     parseFloat(tx.released_amount || 0) > 0;
+
+    if (isFunded) {
       return rollbackWithError(
         conn,
         res,

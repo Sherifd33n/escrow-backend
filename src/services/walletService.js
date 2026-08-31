@@ -3,7 +3,7 @@ import crypto from "crypto";
 
 
 /**
- * Insert a wallet transaction.
+ * Insert a wallet transaction with currency attribution.
  */
 async function addWalletTransaction(
   conn,
@@ -12,14 +12,15 @@ async function addWalletTransaction(
   amount,
   description,
   reference,
+  currency = "USD",
 ) {
   await conn.query(
     `
       INSERT INTO wallet_transactions
-      (wallet_id, type, amount, description, reference)
-      VALUES (?, ?, ?, ?, ?)
+      (wallet_id, type, amount, currency, description, reference)
+      VALUES (?, ?, ?, ?, ?, ?)
     `,
-    [walletId, type, amount, description, reference],
+    [walletId, type, amount, currency, description, reference],
   );
 }
 
@@ -34,6 +35,14 @@ export async function fundEscrow({ conn, transaction, buyerId, amount }) {
   }
 
   const wallet = wallets[0];
+  const walletCurrency = wallet.currency || "USD";
+  const txCurrency = transaction.currency || "USD";
+
+  if (walletCurrency.toUpperCase() !== txCurrency.toUpperCase()) {
+    throw new Error(
+      `Currency mismatch: wallet is denominated in ${walletCurrency}, but transaction requires ${txCurrency}. Direct cross-currency debit is not permitted.`,
+    );
+  }
 
   if (Number(wallet.balance) < Number(amount)) {
     throw new Error("Insufficient wallet balance.");
@@ -62,6 +71,7 @@ export async function fundEscrow({ conn, transaction, buyerId, amount }) {
     amount,
     `Escrow hold for "${transaction.title}"`,
     reference,
+    txCurrency,
   );
 
   return {
@@ -91,9 +101,10 @@ export async function refundEscrow({ conn, transaction, buyerId, amount }) {
 
   if (!wallets.length) {
     // Create wallet if it somehow doesn't exist yet (edge case)
+    const txCurrency = transaction.currency || "USD";
     const [insert] = await conn.query(
-      "INSERT INTO wallets (user_id, balance) VALUES (?, 0)",
-      [buyerId],
+      "INSERT INTO wallets (user_id, balance, currency) VALUES (?, 0, ?)",
+      [buyerId, txCurrency],
     );
 
     const [created] = await conn.query(
@@ -105,6 +116,8 @@ export async function refundEscrow({ conn, transaction, buyerId, amount }) {
   } else {
     wallet = wallets[0];
   }
+
+  const txCurrency = transaction.currency || "USD";
 
   // 2. Credit buyer's wallet balance
   await conn.query("UPDATE wallets SET balance = balance + ? WHERE id = ?", [
@@ -132,6 +145,7 @@ export async function refundEscrow({ conn, transaction, buyerId, amount }) {
     amount,
     `Escrow refund for "${transaction.title}"`,
     reference,
+    txCurrency,
   );
 
   return {
@@ -152,11 +166,12 @@ export async function releaseEscrow({
   );
 
   let wallet;
+  const txCurrency = transaction.currency || "USD";
 
   if (!wallets.length) {
     const [insert] = await conn.query(
-      "INSERT INTO wallets(user_id, balance) VALUES(?, 0)",
-      [recipientId],
+      "INSERT INTO wallets(user_id, balance, currency) VALUES(?, 0, ?)",
+      [recipientId, txCurrency],
     );
 
     const [created] = await conn.query(
@@ -169,11 +184,19 @@ export async function releaseEscrow({
     wallet = wallets[0];
   }
 
+  // Calculate escrow fee (default rate 0.0350 unless stored on transaction)
+  const feeRate = parseFloat(transaction.escrow_fee_rate || 0.035);
+  const releaseAmount = parseFloat(amount || 0);
+  const feeAmount = Number((releaseAmount * feeRate).toFixed(2));
+  const netPayout = Math.max(0, Number((releaseAmount - feeAmount).toFixed(2)));
+
+  // Credit net payout to recipient's (seller's) wallet
   await conn.query("UPDATE wallets SET balance = balance + ? WHERE id = ?", [
-    amount,
+    netPayout,
     wallet.id,
   ]);
 
+  // Update transaction's escrow balance and released amount
   await conn.query(
     `
       UPDATE transactions
@@ -182,23 +205,40 @@ export async function releaseEscrow({
         released_amount = released_amount + ?
       WHERE id = ?
     `,
-    [amount, amount, transaction.id],
+    [releaseAmount, releaseAmount, transaction.id],
   );
 
-  const reference = `REF-RELEASE-${Date.now()}-${crypto.randomInt(1000, 9999)}`;
-
+  // Record net payout ledger entry for seller
+  const releaseRef = `REF-RELEASE-${Date.now()}-${crypto.randomInt(1000, 9999)}`;
   await addWalletTransaction(
     conn,
     wallet.id,
     "escrow_release",
-    amount,
-    `Escrow payout for "${transaction.title}"`,
-    reference,
+    netPayout,
+    `Escrow payout for "${transaction.title}" (Net of ${(feeRate * 100).toFixed(1)}% fee)`,
+    releaseRef,
+    txCurrency,
   );
+
+  // Record escrow fee booking ledger entry if fee > 0
+  if (feeAmount > 0) {
+    const feeRef = `REF-FEE-${Date.now()}-${crypto.randomInt(1000, 9999)}`;
+    await addWalletTransaction(
+      conn,
+      wallet.id,
+      "escrow_fee",
+      feeAmount,
+      `Escrow platform fee (${(feeRate * 100).toFixed(1)}%) for "${transaction.title}"`,
+      feeRef,
+      txCurrency,
+    );
+  }
 
   return {
     wallet,
-    balance: Number(wallet.balance) + Number(amount),
+    balance: Number(wallet.balance) + netPayout,
+    feeAmount,
+    netPayout,
   };
 }
 

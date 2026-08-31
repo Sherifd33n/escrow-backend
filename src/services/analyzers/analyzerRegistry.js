@@ -67,6 +67,31 @@ class AnalyzerRegistry {
 
     return list.filter(Boolean);
   }
+
+  /**
+   * Checks if a category string matches a specialized category analyzer.
+   *
+   * @param {string} category
+   * @returns {boolean}
+   */
+  hasSpecializedAnalyzer(category = "web") {
+    const normCat = (category || "").toLowerCase();
+    return (
+      normCat.includes("web") ||
+      normCat.includes("software") ||
+      normCat.includes("dev") ||
+      normCat.includes("mobile") ||
+      normCat.includes("app") ||
+      normCat.includes("android") ||
+      normCat.includes("ios") ||
+      normCat.includes("design") ||
+      normCat.includes("ui") ||
+      normCat.includes("graphic") ||
+      normCat.includes("ai") ||
+      normCat.includes("ml") ||
+      normCat.includes("data")
+    );
+  }
 }
 
 export const analyzerRegistry = new AnalyzerRegistry();

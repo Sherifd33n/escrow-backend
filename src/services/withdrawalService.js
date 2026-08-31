@@ -122,11 +122,12 @@ export async function processWithdrawalFailure({
       const refCode = `REF-WTH-FAIL-${crypto.randomInt(100000, 999999)}`;
       await conn.query(
         `INSERT INTO wallet_transactions
-         (wallet_id, type, amount, description, reference)
-         VALUES (?, 'deposit', ?, ?, ?)`,
+         (wallet_id, type, amount, currency, description, reference)
+         VALUES (?, 'deposit', ?, ?, ?, ?)`,
         [
           wallet.id,
           restoreAmount,
+          wallet.currency || 'USD',
           `Failed Withdrawal Refund (${reason}) [Ref: ${reference}]`,
           refCode,
         ]
@@ -221,11 +222,12 @@ export async function processWithdrawalReversal({
       const refCode = `REF-WTH-REV-${crypto.randomInt(100000, 999999)}`;
       await conn.query(
         `INSERT INTO wallet_transactions
-         (wallet_id, type, amount, description, reference)
-         VALUES (?, 'deposit', ?, ?, ?)`,
+         (wallet_id, type, amount, currency, description, reference)
+         VALUES (?, 'deposit', ?, ?, ?, ?)`,
         [
           wallet.id,
           restoreAmount,
+          wallet.currency || 'USD',
           `Reversed Withdrawal Restored (${reason}) [Ref: ${reference}]`,
           refCode,
         ]

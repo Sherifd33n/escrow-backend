@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS `users` (
   `notif_push` TINYINT(1) NOT NULL DEFAULT 1,
   `public_profile` TINYINT(1) NOT NULL DEFAULT 1,
   `marketing_comms` TINYINT(1) NOT NULL DEFAULT 0,
+  `deleted_at` TIMESTAMP NULL DEFAULT NULL,
   `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   `updated_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB;
@@ -36,7 +37,8 @@ CREATE TABLE IF NOT EXISTS `otp_codes` (
     `type` ENUM(
         'signup',
         'forgot',
-        'phone_verification'
+        'phone_verification',
+        'login_2fa'
     ) NOT NULL DEFAULT 'signup',
     `expires_at` TIMESTAMP NULL DEFAULT NULL,
     `used` TINYINT(1) NOT NULL DEFAULT 0,
@@ -199,8 +201,9 @@ CREATE TABLE IF NOT EXISTS `milestone_submissions` (
 CREATE TABLE IF NOT EXISTS `wallet_transactions` (
   `id` INT AUTO_INCREMENT PRIMARY KEY,
   `wallet_id` INT NOT NULL,
-  `type` ENUM('deposit', 'withdrawal', 'escrow_hold', 'escrow_release', 'escrow_refund') NOT NULL,
+  `type` ENUM('deposit', 'withdrawal', 'escrow_hold', 'escrow_release', 'escrow_refund', 'subscription', 'escrow_fee') NOT NULL,
   `amount` DECIMAL(15, 2) NOT NULL,
+  `currency` VARCHAR(3) NOT NULL DEFAULT 'USD',
   `description` VARCHAR(255) NOT NULL,
   `reference` VARCHAR(100) NOT NULL UNIQUE,
   `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,

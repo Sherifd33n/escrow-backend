@@ -131,24 +131,49 @@ export function runDeterministicChecks({
       facts.push("Staging site verified reachable (HTTP 200 OK).");
     }
 
-    // 5. Check test execution & test results
-    const testExecuted = !!testingInfo.performed;
+    // 5. Evidence Classification & Independent Testing Verification
+    const providerReported = !!testingInfo.performed;
     const testSummaryText = (testingInfo.summary || "").toLowerCase();
-    const testPassed =
-      testExecuted &&
-      !testSummaryText.includes("fail") &&
-      !testSummaryText.includes("error") &&
-      !testSummaryText.includes("0 test");
 
-    if (testExecuted) {
-      facts.push(`Testing performed by provider: "${testingInfo.summary || "Tests executed"}".`);
+    // Check if Stage 2 findings contain actual test reports, logs, or CI execution output artifacts
+    const testArtifactFindings = stage2Findings.filter(
+      (f) =>
+        f.finding_type === "test_report" ||
+        f.finding_type === "ci_output" ||
+        f.finding_type === "test_log" ||
+        f.finding_type === "test_execution_result",
+    );
+    const evidenceBacked = testArtifactFindings.length > 0;
+
+    // Check if platform executed tests independently (or trusted runner verified execution)
+    const independentVerifiedFindings = stage2Findings.filter(
+      (f) => f.finding_type === "independent_test_verified" && f.finding_text.includes("Verified: true"),
+    );
+    const independentlyVerified = independentVerifiedFindings.length > 0;
+
+    // A provider claiming tests passed is provider-reported evidence, NOT proof of execution
+    const testExecuted = independentlyVerified || evidenceBacked;
+    const testPassed = independentlyVerified;
+
+    if (providerReported) {
+      facts.push(`[PROVIDER_REPORTED] Testing claimed by provider: "${testingInfo.summary || "Tests executed"}". (Self-reported, not independently verified).`);
+    }
+
+    if (evidenceBacked) {
+      facts.push(`[EVIDENCE_BACKED] Test execution artifact/log verified (${testArtifactFindings.length} item(s)).`);
+    }
+
+    if (!independentlyVerified) {
+      facts.push("[INDEPENDENT_TESTING] Independent test execution: Not verified.");
+    } else {
+      facts.push("[INDEPENDENT_TESTING] Independent test execution: PASSED & VERIFIED.");
     }
 
     // 6. Contradiction Detection
     let contradictionDetected = false;
     const claim = (subDeliverable?.claim || "").toLowerCase();
 
-    // Contradiction 1: Claim says 100% tests pass, but testing summary notes failure
+    // Contradiction 1: Claim asserts 100% tests pass, but provider summary notes failure
     if (
       (claim.includes("all tests pass") || claim.includes("100% pass")) &&
       (testSummaryText.includes("failed") || testSummaryText.includes("error"))
@@ -174,6 +199,9 @@ export function runDeterministicChecks({
       evidenceProcessed,
       evidenceHashVerified,
       urlReachable,
+      providerReportedTesting: providerReported,
+      evidenceBackedTesting: evidenceBacked,
+      independentlyVerifiedTesting: independentlyVerified,
       testExecuted,
       testPassed,
       contradictionDetected,

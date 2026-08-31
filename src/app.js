@@ -77,8 +77,11 @@ app.use(
     },
   })
 );
+import filesRoutes from "./routes/files.js";
+
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
-app.use("/uploads", express.static(path.join(__dirname, "../uploads")));
+app.use("/uploads", filesRoutes);
+app.use("/api/files", filesRoutes);
 
 // Routes
 app.use("/api/auth", authRoutes);

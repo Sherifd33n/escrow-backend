@@ -52,7 +52,8 @@ router.post("/", async (req, res, next) => {
 // GET /api/audit-jobs/:jobId - Poll job status, progress (0-100%), and completed audit result
 router.get("/:jobId", async (req, res, next) => {
   try {
-    const jobStatus = await getJobStatus(req.params.jobId);
+    const isAdmin = req.user && req.user.role === "admin";
+    const jobStatus = await getJobStatus(req.params.jobId, req.user.id, isAdmin);
     if (!jobStatus) {
       return res.status(404).json({ error: "Audit job not found." });
     }

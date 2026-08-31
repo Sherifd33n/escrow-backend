@@ -221,30 +221,39 @@ export async function processSingleEvidence({ transactionId, milestoneId, submis
   let mimeType = null;
   let detectedFileType = "unknown";
 
-  // 1. Check if evidence refers to a local file on disk or upload path
+  // 1. Check if evidence refers to a local upload path
   if (rawItem.url) {
     const normUrl = String(rawItem.url).replace(/\\/g, "/");
     let candidatePath = null;
 
     if (normUrl.includes("/uploads/evidence/")) {
       const rel = normUrl.split("/uploads/evidence/")[1].split("?")[0].split("#")[0];
-      candidatePath = path.join(UPLOADS_DIR, decodeURIComponent(rel));
-    } else if (fs.existsSync(rawItem.url)) {
-      candidatePath = rawItem.url;
+      const safeBasename = path.basename(decodeURIComponent(rel));
+      candidatePath = path.join(UPLOADS_DIR, "evidence", safeBasename);
+    } else if (normUrl.includes("/uploads/kyc/")) {
+      const rel = normUrl.split("/uploads/kyc/")[1].split("?")[0].split("#")[0];
+      const safeBasename = path.basename(decodeURIComponent(rel));
+      candidatePath = path.join(UPLOADS_DIR, "kyc", safeBasename);
     }
 
-    if (candidatePath && fs.existsSync(candidatePath)) {
-      storagePath = candidatePath;
-      const valRes = await validateEvidenceFile({
-        filePath: storagePath,
-        fileName: rawItem.file_name || path.basename(storagePath),
-      });
+    if (candidatePath) {
+      const resolvedPath = path.resolve(candidatePath);
+      const allowedRoot = path.resolve(UPLOADS_DIR);
 
-      if (valRes.valid) {
-        fileBuffer = valRes.buffer;
-        fileSize = valRes.size;
-        detectedFileType = valRes.detectedType;
-        sha256Hash = calculateSha256(fileBuffer);
+      // Root jail check: candidate path must reside strictly within UPLOADS_DIR
+      if (resolvedPath.startsWith(allowedRoot) && fs.existsSync(resolvedPath)) {
+        storagePath = resolvedPath;
+        const valRes = await validateEvidenceFile({
+          filePath: storagePath,
+          fileName: rawItem.file_name || path.basename(storagePath),
+        });
+
+        if (valRes.valid) {
+          fileBuffer = valRes.buffer;
+          fileSize = valRes.size;
+          detectedFileType = valRes.detectedType;
+          sha256Hash = calculateSha256(fileBuffer);
+        }
       }
     }
   }

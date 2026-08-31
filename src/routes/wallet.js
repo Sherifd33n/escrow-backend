@@ -150,6 +150,16 @@ router.post("/transfer", async (req, res, next) => {
 
     const recipientWallet = await getOrCreateWallet(recipientId, conn, true);
 
+    const senderCurrency = senderWallet.currency || "USD";
+    const recipientCurrency = recipientWallet.currency || "USD";
+
+    if (senderCurrency.toUpperCase() !== recipientCurrency.toUpperCase()) {
+      await conn.rollback();
+      return res.status(400).json({
+        error: `Currency mismatch: sender wallet is ${senderCurrency} but recipient wallet is ${recipientCurrency}. Direct cross-currency transfer is not permitted.`,
+      });
+    }
+
     const newSenderBalance = senderBalance - transferAmt;
 
     const newRecipientBalance =
@@ -171,11 +181,12 @@ router.post("/transfer", async (req, res, next) => {
 
     await conn.query(
       `INSERT INTO wallet_transactions
-      (wallet_id, type, amount, description, reference)
-      VALUES (?, 'withdrawal', ?, ?, ?)`,
+      (wallet_id, type, amount, currency, description, reference)
+      VALUES (?, 'withdrawal', ?, ?, ?, ?)`,
       [
         senderWallet.id,
         transferAmt,
+        senderCurrency,
         `Transfer to ${recipients[0].name}${transferNote}`,
         reference,
       ],
@@ -183,11 +194,12 @@ router.post("/transfer", async (req, res, next) => {
 
     await conn.query(
       `INSERT INTO wallet_transactions
-      (wallet_id, type, amount, description, reference)
-      VALUES (?, 'deposit', ?, ?, ?)`,
+      (wallet_id, type, amount, currency, description, reference)
+      VALUES (?, 'deposit', ?, ?, ?, ?)`,
       [
         recipientWallet.id,
         transferAmt,
+        recipientCurrency,
         `Transfer from ${req.user.name}${transferNote}`,
         `REF-REC-${crypto.randomInt(100000, 999999)}`,
       ],

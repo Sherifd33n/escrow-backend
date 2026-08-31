@@ -1,5 +1,6 @@
 import express from "express";
 import authMiddleware from "../middleware/auth.js";
+import db from "../config/db.js";
 import { generateAiScope, runAiAudit, getTransactionAudits } from "../services/aiService.js";
 
 const router = express.Router();
@@ -59,7 +60,40 @@ function sanitizeAuditObject(obj) {
 // POST /api/ai/scope - Generate project scope using AI
 router.post("/scope", async (req, res, next) => {
   try {
-    const { categoryLabel, description } = req.body;
+    const { categoryLabel, description, transactionId } = req.body;
+
+    // Check if editing an existing transaction
+    if (transactionId) {
+      const numId = Number(transactionId);
+      const querySql = !isNaN(numId)
+        ? "SELECT * FROM transactions WHERE id = ?"
+        : "SELECT * FROM transactions WHERE txn_code = ?";
+      const txRows = await db.query(querySql, [transactionId]);
+
+      if (txRows.length > 0) {
+        const tx = txRows[0];
+        // Authorize participant access
+        if (tx.buyer_id !== req.user.id && tx.seller_id !== req.user.id && req.user.role !== "admin") {
+          return res.status(403).json({ error: "Access denied." });
+        }
+
+        // Check if transaction is funded
+        const milestones = await db.query(
+          "SELECT status FROM milestones WHERE transaction_id = ?",
+          [tx.id]
+        );
+        const hasPaidOrApproved = milestones.some(m => ["paid", "approved"].includes(m.status));
+        const isFunded = tx.status !== "pending" ||
+                         hasPaidOrApproved ||
+                         parseFloat(tx.escrow_balance || 0) > 0 ||
+                         parseFloat(tx.released_amount || 0) > 0;
+
+        if (isFunded) {
+          return res.status(400).json({ error: "Funded transactions cannot be modified." });
+        }
+      }
+    }
+
     if (!description || !description.trim()) {
       return res.status(400).json({ error: "Project description is required." });
     }

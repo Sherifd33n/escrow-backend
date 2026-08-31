@@ -3,13 +3,15 @@ import authMiddleware from "../middleware/auth.js";
 import {
   getUserEntitlements,
   PLAN_CONFIGS,
-  getPlanBillingAmount,
 } from "../services/entitlementService.js";
 import {
   activateSubscription,
-  createCheckoutSession,
+  initiateSubscriptionPayment,
+  verifyAndActivateSubscriptionPayment,
   cancelSubscription,
+  cancelPendingDowngrade,
 } from "../services/subscriptionService.js";
+import paystackService from "../services/paystackService.js";
 
 const router = express.Router();
 
@@ -40,6 +42,45 @@ router.get("/plans", (req, res) => {
     success: true,
     plans,
   });
+});
+
+// POST /webhook - Paystack webhook for subscription charge events (server-to-server)
+// Must be before authMiddleware so it remains publicly accessible to Paystack
+router.post("/webhook", express.raw({ type: "application/json" }), async (req, res) => {
+  // Verify Paystack webhook signature
+  const signature = req.headers["x-paystack-signature"];
+  const rawBody = req.body;
+
+  if (!paystackService.verifyWebhookSignature(rawBody, signature)) {
+    console.error("[SubscriptionWebhook] Invalid webhook signature.");
+    return res.status(400).json({ error: "Invalid signature" });
+  }
+
+  let event;
+  try {
+    event = typeof rawBody === "string" ? JSON.parse(rawBody) : (Buffer.isBuffer(rawBody) ? JSON.parse(rawBody.toString("utf8")) : rawBody);
+  } catch {
+    return res.status(400).json({ error: "Malformed webhook payload" });
+  }
+
+  try {
+    if (
+      event &&
+      event.event === "charge.success" &&
+      event.data &&
+      event.data.metadata?.purpose === "subscription"
+    ) {
+      const reference = event.data.reference;
+      if (reference) {
+        // userId=null because we derive it from the payment record — ownership already established
+        await verifyAndActivateSubscriptionPayment(reference, null);
+      }
+    }
+    res.json({ received: true });
+  } catch (err) {
+    console.error("[SubscriptionWebhook] Processing error:", err.message);
+    res.status(500).json({ error: "Webhook processing error" });
+  }
 });
 
 // All following routes require authentication
@@ -73,52 +114,73 @@ router.get("/entitlements", async (req, res, next) => {
   }
 });
 
-// POST /checkout - Initiate checkout for selected plan & cycle
-router.post("/checkout", async (req, res, next) => {
+// POST /initiate-payment - Initialise a Paystack payment for a subscription plan.
+// Server calculates amount from PLAN_CONFIGS — client cannot supply a price.
+// Returns an authorization_url for the frontend to redirect the user to Paystack.
+router.post("/initiate-payment", async (req, res, next) => {
   try {
     const { planId, billingCycle } = req.body;
+
     if (!planId) {
       return res.status(400).json({ error: "planId is required." });
     }
 
+    const normalizedPlanId = planId.toLowerCase();
+    if (!PLAN_CONFIGS[normalizedPlanId]) {
+      return res.status(400).json({ error: "Invalid plan ID." });
+    }
+
     const cycle = billingCycle === "annual" ? "annual" : "monthly";
-    const session = await createCheckoutSession(req.user.id, planId, cycle);
+
+    const session = await initiateSubscriptionPayment(
+      req.user.id,
+      normalizedPlanId,
+      cycle,
+      req.user.email
+    );
 
     res.json({
       success: true,
-      session,
+      ...session,
     });
   } catch (error) {
     next(error);
   }
 });
 
-// POST /upgrade - Upgrade or activate subscription after verified payment
-router.post("/upgrade", async (req, res, next) => {
+// POST /verify-payment/:reference - Verify a subscription payment and activate the plan.
+// Calls Paystack server-to-server. Only activates subscription on confirmed success.
+// Idempotent: replaying the same verified reference returns success without re-activating.
+router.post("/verify-payment/:reference", async (req, res, next) => {
   try {
-    const { planId, billingCycle, paymentProvider, referenceId } = req.body;
-    if (!planId) {
-      return res.status(400).json({ error: "planId is required." });
+    const { reference } = req.params;
+
+    if (!reference) {
+      return res.status(400).json({ error: "Payment reference is required." });
     }
 
-    const cycle = billingCycle === "annual" ? "annual" : "monthly";
+    const result = await verifyAndActivateSubscriptionPayment(reference, req.user.id);
 
-    const result = await activateSubscription({
-      userId: req.user.id,
-      planId,
-      billingCycle: cycle,
-      paymentProvider: paymentProvider || "card",
-      providerReferenceId: referenceId || `REF-${Date.now()}`,
-    });
+    if (!result.success) {
+      return res.status(400).json({
+        error: result.message || "Payment verification failed. Subscription not activated.",
+        ...result,
+      });
+    }
 
     const entitlements = await getUserEntitlements(req.user.id);
 
     res.json({
-      message: `Successfully subscribed to ${PLAN_CONFIGS[planId.toLowerCase()]?.name || planId}!`,
-      subscription: result,
+      success: true,
+      message: result.message || "Subscription activated successfully.",
+      alreadyProcessed: result.alreadyProcessed || false,
+      subscription: result.subscription,
       entitlements,
     });
   } catch (error) {
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({ error: error.message });
+    }
     next(error);
   }
 });
@@ -136,28 +198,16 @@ router.post("/cancel", async (req, res, next) => {
   }
 });
 
-// POST /webhook - Payment provider webhook endpoint (Server-to-server payment verification)
-router.post("/webhook", express.raw({ type: "application/json" }), async (req, res) => {
+// POST /cancel-pending-downgrade - Cancel scheduled pending downgrade
+router.post("/cancel-pending-downgrade", async (req, res, next) => {
   try {
-    const event = req.body;
-    // Standard webhook signature verification logic goes here
-    if (event && event.type === "charge.success" && event.data) {
-      const metadata = event.data.metadata || {};
-      if (metadata.userId && metadata.planId) {
-        await activateSubscription({
-          userId: metadata.userId,
-          planId: metadata.planId,
-          billingCycle: metadata.billingCycle || "monthly",
-          paymentProvider: event.data.channel || "paystack",
-          providerReferenceId: event.data.reference,
-          metadata: event.data,
-        });
-      }
-    }
-    res.json({ received: true });
-  } catch (err) {
-    console.error("Webhook processing error:", err.message);
-    res.status(400).json({ error: "Webhook processing error" });
+    const result = await cancelPendingDowngrade(req.user.id);
+    res.json({
+      success: true,
+      ...result,
+    });
+  } catch (error) {
+    next(error);
   }
 });
 

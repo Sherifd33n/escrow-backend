@@ -120,8 +120,8 @@ export async function processSuccessfulPayment({ reference, providerData = null,
 
     const [txResult] = await conn.query(
       `INSERT INTO wallet_transactions
-       (wallet_id, type, amount, description, reference)
-       VALUES (?, 'deposit', ?, ?, ?)`,
+       (wallet_id, type, amount, currency, description, reference)
+       VALUES (?, 'deposit', ?, 'USD', ?, ?)`,
       [
         wallet.id,
         creditAmountUSD,

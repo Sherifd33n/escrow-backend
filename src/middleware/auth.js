@@ -3,12 +3,17 @@ import db from '../config/db.js';
 
 export default async function auth(req, res, next) {
   try {
+    let token = null;
     const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ error: 'No token provided, authorization denied.' });
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      token = authHeader.split(' ')[1];
+    } else if (req.query && req.query.token) {
+      token = req.query.token;
     }
 
-    const token = authHeader.split(' ')[1];
+    if (!token) {
+      return res.status(401).json({ error: 'No token provided, authorization denied.' });
+    }
 
     // Verify token
     const decoded = jwt.verify(token, process.env.JWT_SECRET || 'escrow_super_secret_key_change_in_production_2025');
@@ -27,12 +32,12 @@ export default async function auth(req, res, next) {
 
     // Retrieve user from DB to verify they still exist and get updated information
     const users = await db.query(
-      'SELECT id, name, email, role, phone, phone_verified, phone_verified_at, kyc_tier, is_verified, two_factor_enabled, notif_email, notif_sms, notif_push, public_profile, marketing_comms FROM users WHERE id = ?',
+      'SELECT id, name, email, role, phone, phone_verified, phone_verified_at, kyc_tier, is_verified, is_active, deleted_at, two_factor_enabled, notif_email, notif_sms, notif_push, public_profile, marketing_comms FROM users WHERE id = ?',
       [decoded.id]
     );
 
-    if (users.length === 0) {
-      return res.status(401).json({ error: 'Token is invalid or user does not exist.' });
+    if (users.length === 0 || users[0].is_active === 0 || users[0].deleted_at !== null) {
+      return res.status(401).json({ error: 'Token is invalid, or account has been deactivated.' });
     }
 
     // Attach user to request object

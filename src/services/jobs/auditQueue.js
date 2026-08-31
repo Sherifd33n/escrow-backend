@@ -76,13 +76,25 @@ export async function createAuditJob({
 }
 
 /**
- * Fetches status, phase, progress, and completed result for an audit job.
+ * Fetches status, phase, progress, and completed result for an audit job if authorized.
  *
  * @param {string} jobId
+ * @param {number} userId
+ * @param {boolean} [isAdmin=false]
  * @returns {Promise<object|null>}
  */
-export async function getJobStatus(jobId) {
-  const rows = await db.query("SELECT * FROM audit_jobs WHERE job_id = ?", [jobId]);
+export async function getJobStatus(jobId, userId, isAdmin = false) {
+  let rows = [];
+  if (isAdmin) {
+    rows = await db.query("SELECT * FROM audit_jobs WHERE job_id = ?", [jobId]);
+  } else {
+    rows = await db.query(
+      `SELECT j.* FROM audit_jobs j
+       LEFT JOIN transactions t ON j.transaction_id = t.id
+       WHERE j.job_id = ? AND (j.user_id = ? OR t.buyer_id = ? OR t.seller_id = ?)`,
+      [jobId, userId, userId, userId],
+    );
+  }
   if (!rows.length) return null;
 
   const job = rows[0];

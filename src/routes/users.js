@@ -1,8 +1,10 @@
+import crypto from "crypto";
 import express from "express";
 import bcrypt from "bcryptjs";
 import db from "../config/db.js";
 import authMiddleware from "../middleware/auth.js";
 import { sendVerificationCode, verifyCode } from "../services/sms/twilio.js";
+import { sendOTPEmail } from "../utils/mailer.js";
 import multer from "multer";
 import fs from "fs";
 import path from "path";
@@ -14,7 +16,7 @@ import { otpLimiter } from "../middleware/rateLimiter.js";
 const router = express.Router();
 
 function generateOTP() {
-  return Math.floor(100000 + Math.random() * 900000).toString();
+  return crypto.randomInt(100000, 999999).toString();
 }
 
 function normalizePhone(phone) {
@@ -108,8 +110,9 @@ router.patch("/profile", async (req, res, next) => {
 
     // Toggle fields
     if (two_factor_enabled !== undefined) {
-      updates.push("two_factor_enabled = ?");
-      params.push(two_factor_enabled ? 1 : 0);
+      return res.status(400).json({
+        error: "Two-factor authentication cannot be toggled directly. Please use the 2FA setup or disable option with verification.",
+      });
     }
 
     if (notif_email !== undefined) {
@@ -339,32 +342,153 @@ router.patch("/change-password", async (req, res, next) => {
   }
 });
 
-// DELETE /profile - Delete user account
-router.delete("/profile", async (req, res, next) => {
+// POST /2fa/send-otp - Send OTP email for 2FA activation
+router.post("/2fa/send-otp", otpLimiter, async (req, res, next) => {
   const userId = req.user.id;
-  const conn = await db.getPool().getConnection();
+  try {
+    const otpCode = generateOTP();
+    const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
+
+    await db.query("UPDATE otp_codes SET used = 1 WHERE user_id = ? AND type = 'login_2fa'", [userId]);
+    await db.query("INSERT INTO otp_codes (user_id, code, type, expires_at) VALUES (?, ?, 'login_2fa', ?)", [userId, otpCode, expiresAt]);
+
+    try {
+      await sendOTPEmail(req.user.email, otpCode, "login_2fa");
+    } catch (e) {
+      console.error("[2FA send-otp]", e.message);
+    }
+
+    res.json({ message: "Verification code sent to your email." });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /2fa/enable - Enable 2FA after verifying OTP code
+router.post("/2fa/enable", async (req, res, next) => {
+  const userId = req.user.id;
+  const { code } = req.body;
+
+  if (!code) {
+    return res.status(400).json({ error: "Verification code is required." });
+  }
 
   try {
-    await conn.beginTransaction();
+    const otps = await db.query(
+      `SELECT * FROM otp_codes WHERE user_id = ? AND code = ? AND type = 'login_2fa' AND used = 0 AND expires_at > NOW() ORDER BY created_at DESC LIMIT 1`,
+      [userId, code]
+    );
 
-    await conn.query("DELETE FROM otp_codes WHERE user_id=?", [userId]);
+    if (otps.length === 0) {
+      return res.status(400).json({ error: "Invalid or expired verification code." });
+    }
 
-    await conn.query("DELETE FROM user_sessions WHERE user_id=?", [userId]);
+    await db.query("UPDATE otp_codes SET used = 1 WHERE id = ?", [otps[0].id]);
+    await db.query("UPDATE users SET two_factor_enabled = 1 WHERE id = ?", [userId]);
 
-    await conn.query("DELETE FROM kyc_submissions WHERE user_id=?", [userId]);
-
-    await conn.query("DELETE FROM users WHERE id=?", [userId]);
-
-    await conn.commit();
-
-    res.json({
-      message: "Account deleted successfully.",
-    });
+    const users = await db.query("SELECT id, name, email, role, two_factor_enabled FROM users WHERE id = ?", [userId]);
+    res.json({ message: "Two-Factor Authentication enabled successfully.", user: users[0] });
   } catch (err) {
-    await conn.rollback();
     next(err);
-  } finally {
-    conn.release();
+  }
+});
+
+// POST /2fa/disable - Disable 2FA with password re-authentication
+router.post("/2fa/disable", async (req, res, next) => {
+  const userId = req.user.id;
+  const { password } = req.body;
+
+  if (!password) {
+    return res.status(400).json({ error: "Current password is required to disable 2FA." });
+  }
+
+  try {
+    const users = await db.query("SELECT password_hash FROM users WHERE id = ?", [userId]);
+    if (!users.length) return res.status(404).json({ error: "User not found." });
+
+    const isMatch = await bcrypt.compare(password, users[0].password_hash);
+    if (!isMatch) {
+      return res.status(400).json({ error: "Incorrect password." });
+    }
+
+    await db.query("UPDATE users SET two_factor_enabled = 0 WHERE id = ?", [userId]);
+    const updated = await db.query("SELECT id, name, email, role, two_factor_enabled FROM users WHERE id = ?", [userId]);
+
+    res.json({ message: "Two-Factor Authentication disabled successfully.", user: updated[0] });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// DELETE /profile - Deactivate user account while preserving financial/audit history
+router.delete("/profile", async (req, res, next) => {
+  const userId = req.user.id;
+
+  try {
+    // 1. Check for active financial obligations
+    const activeTx = await db.query(
+      `SELECT id FROM transactions WHERE (buyer_id = ? OR seller_id = ?) AND status IN ('funded', 'inprogress', 'inspection', 'audit', 'revision', 'disputed') LIMIT 1`,
+      [userId, userId]
+    );
+    if (activeTx.length > 0) {
+      return res.status(400).json({
+        error: "Cannot deactivate account while active financial transactions or escrows are in progress."
+      });
+    }
+
+    const pendingWithdrawals = await db.query(
+      `SELECT id FROM withdrawals WHERE user_id = ? AND status = 'pending' LIMIT 1`,
+      [userId]
+    );
+    if (pendingWithdrawals.length > 0) {
+      return res.status(400).json({
+        error: "Cannot deactivate account while a withdrawal is pending."
+      });
+    }
+
+    const openDisputes = await db.query(
+      `SELECT id FROM disputes WHERE filed_by = ? AND status = 'open' LIMIT 1`,
+      [userId]
+    );
+    if (openDisputes.length > 0) {
+      return res.status(400).json({
+        error: "Cannot deactivate account while an open dispute exists."
+      });
+    }
+
+    // 2. Perform soft-deactivation (mark user inactive, set deleted_at, anonymize PII)
+    const conn = await db.getPool().getConnection();
+    try {
+      await conn.beginTransaction();
+
+      await conn.query(
+        `UPDATE users
+         SET is_active = 0,
+             deleted_at = CURRENT_TIMESTAMP,
+             name = 'Deactivated User',
+             email = CONCAT('deactivated_', id, '@removed.local'),
+             phone = NULL
+         WHERE id = ?`,
+        [userId]
+      );
+
+      // Invalidate active sessions and active OTPs
+      await conn.query("DELETE FROM user_sessions WHERE user_id = ?", [userId]);
+      await conn.query("DELETE FROM otp_codes WHERE user_id = ?", [userId]);
+
+      await conn.commit();
+
+      res.json({
+        message: "Account deactivated successfully. Financial and audit history preserved for compliance."
+      });
+    } catch (err) {
+      await conn.rollback();
+      throw err;
+    } finally {
+      conn.release();
+    }
+  } catch (err) {
+    next(err);
   }
 });
 

@@ -152,6 +152,10 @@ async function runMigrations(conn) {
       name: "is_active",
       definition: "TINYINT(1) NOT NULL DEFAULT 1",
     },
+    {
+      name: "deleted_at",
+      definition: "TIMESTAMP NULL DEFAULT NULL",
+    },
   ];
 
   for (const col of columnsToAdd) {
@@ -243,7 +247,8 @@ async function runMigrations(conn) {
     MODIFY COLUMN type ENUM(
       'signup',
       'forgot',
-      'phone_verification'
+      'phone_verification',
+      'login_2fa'
     ) NOT NULL DEFAULT 'signup'
   `);
 
@@ -412,7 +417,9 @@ WHERE is_verified IS NULL;
     { name: "provider_reference_id", definition: "VARCHAR(255) DEFAULT NULL" },
     { name: "auto_renew", definition: "TINYINT(1) NOT NULL DEFAULT 1" },
     { name: "cancelled_at", definition: "TIMESTAMP NULL DEFAULT NULL" },
-    { name: "metadata", definition: "JSON DEFAULT NULL" }
+    { name: "metadata", definition: "JSON DEFAULT NULL" },
+    { name: "pending_plan_id", definition: "VARCHAR(50) DEFAULT NULL" },
+    { name: "pending_billing_cycle", definition: "VARCHAR(50) DEFAULT NULL" }
   ];
 
   for (const col of subColumns) {
@@ -450,6 +457,38 @@ WHERE is_verified IS NULL;
     console.log("Migration: subscriptions_history table checked/created.");
   } catch (err) {
     console.error("Migration failed to create subscriptions_history table:", err);
+  }
+
+  // Clean up any unverified subscription records auto-inserted during signup prior to the security fix
+  try {
+    await conn.query(`
+      UPDATE subscriptions
+      SET status = 'expired'
+      WHERE provider_reference_id IS NULL AND status = 'active'
+    `);
+  } catch (err) {
+    console.error("Migration failed to clean up unverified subscriptions:", err);
+  }
+
+  // Update wallet_transactions.type ENUM to include 'subscription' and 'escrow_fee'
+  try {
+    await conn.query(`
+      ALTER TABLE wallet_transactions
+      MODIFY COLUMN type ENUM('deposit', 'withdrawal', 'escrow_hold', 'escrow_release', 'escrow_refund', 'subscription', 'escrow_fee') NOT NULL
+    `);
+  } catch (err) {
+    console.error("Migration failed to update wallet_transactions.type ENUM:", err);
+  }
+
+  // Ensure wallet_transactions has currency column
+  try {
+    const [wtCurrencyCols] = await conn.query("SHOW COLUMNS FROM wallet_transactions LIKE 'currency'");
+    if (wtCurrencyCols.length === 0) {
+      await conn.query("ALTER TABLE wallet_transactions ADD COLUMN `currency` VARCHAR(3) NOT NULL DEFAULT 'USD'");
+      console.log("Migration: Added wallet_transactions.currency column.");
+    }
+  } catch (err) {
+    console.error("Migration failed to add wallet_transactions.currency:", err);
   }
 
   // ----------------------------------------------------

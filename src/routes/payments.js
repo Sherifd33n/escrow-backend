@@ -5,6 +5,7 @@ import authMiddleware from "../middleware/auth.js";
 import paystackService from "../services/paystackService.js";
 import paymentService from "../services/paymentService.js";
 import withdrawalService from "../services/withdrawalService.js";
+import { verifyAndActivateSubscriptionPayment } from "../services/subscriptionService.js";
 import { getUsdToNgnRate } from "../services/exchangeRateService.js";
 import { getAvailableBalance } from "../services/walletService.js";
 
@@ -58,13 +59,23 @@ router.post("/webhook/paystack", async (req, res) => {
 
     // Process event based on type
     switch (eventType) {
-      case "charge.success":
-        await paymentService.processSuccessfulPayment({
-          reference: providerRef,
-          providerData: eventData,
-          passedConn: conn,
-        });
+      case "charge.success": {
+        const paymentPurpose = eventData.metadata?.purpose;
+
+        if (paymentPurpose === "subscription") {
+          // Subscription payment — verify and activate the plan
+          // userId=null: ownership is established from the payments record itself
+          await verifyAndActivateSubscriptionPayment(providerRef, null);
+        } else {
+          // Wallet-funding payment (default)
+          await paymentService.processSuccessfulPayment({
+            reference: providerRef,
+            providerData: eventData,
+            passedConn: conn,
+          });
+        }
         break;
+      }
 
       case "transfer.success":
         await withdrawalService.processWithdrawalSuccess({

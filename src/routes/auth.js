@@ -30,9 +30,9 @@ function parseUserAgent(ua) {
   return "Desktop PC";
 }
 
-// Helper to generate 6-digit OTP
+// Helper to generate 6-digit OTP using cryptographically secure random integers
 function generateOTP() {
-  return Math.floor(100000 + Math.random() * 900000).toString();
+  return crypto.randomInt(100000, 999999).toString();
 }
 
 // 1. Signup Route
@@ -99,13 +99,8 @@ router.post("/signup", authLimiter, async (req, res, next) => {
         [userId],
       );
 
-      // Create default subscription (silver) for the user
-      const subscriptionExpiry = new Date();
-      subscriptionExpiry.setMonth(subscriptionExpiry.getMonth() + 1); // 1 month from now
-      await conn.query(
-        "INSERT INTO subscriptions (user_id, plan_id, billing_cycle, ends_at) VALUES (?, ?, ?, ?)",
-        [userId, "silver", "monthly", subscriptionExpiry],
-      );
+      // No subscription is created at registration — users must complete a verified
+      // payment to activate a paid plan. getUserEntitlements() handles subStatus='none'.
 
       // Generate OTP
       const otpCode = generateOTP();
@@ -177,7 +172,7 @@ router.post("/login", authLimiter, async (req, res, next) => {
   try {
     // Find user
     const users = await db.query(
-      "SELECT id, name, email, role, password_hash, is_verified, is_active, kyc_tier, two_factor_enabled, notif_email, notif_sms, notif_push, public_profile, marketing_comms, phone, phone_verified FROM users WHERE email = ?",
+      "SELECT id, name, email, role, password_hash, is_verified, is_active, deleted_at, kyc_tier, two_factor_enabled, notif_email, notif_sms, notif_push, public_profile, marketing_comms, phone, phone_verified FROM users WHERE email = ?",
       [email],
     );
     if (users.length === 0) {
@@ -186,9 +181,9 @@ router.post("/login", authLimiter, async (req, res, next) => {
 
     const user = users[0];
 
-    if (user.is_active === 0) {
+    if (user.is_active === 0 || user.deleted_at !== null) {
       return res.status(403).json({
-        error: "Your account has been suspended.",
+        error: "Your account has been deactivated or suspended.",
       });
     }
 
@@ -242,6 +237,34 @@ router.post("/login", authLimiter, async (req, res, next) => {
       });
     }
 
+    // 2FA Guard: If two_factor_enabled is active, require second factor before issuing token
+    if (user.two_factor_enabled === 1 || user.two_factor_enabled === true) {
+      const otpCode = generateOTP();
+      const expiryMinutes = 5;
+      const expiresAt = new Date(Date.now() + expiryMinutes * 60 * 1000);
+
+      await db.query(
+        "UPDATE otp_codes SET used = 1 WHERE user_id = ? AND type = 'login_2fa'",
+        [user.id],
+      );
+
+      await db.query(
+        "INSERT INTO otp_codes (user_id, code, type, expires_at) VALUES (?, ?, 'login_2fa', ?)",
+        [user.id, otpCode, expiresAt],
+      );
+
+      try {
+        await sendOTPEmail(user.email, otpCode, "login_2fa");
+      } catch (err) {
+        console.error("Failed to send 2FA OTP email:", err);
+      }
+
+      return res.json({
+        twoFactorRequired: true,
+        user: { id: user.id, email: user.email },
+      });
+    }
+
     // Create database session record
     const tokenJti = crypto.randomUUID();
     const ua = req.headers["user-agent"] || "";
@@ -283,6 +306,107 @@ router.post("/login", authLimiter, async (req, res, next) => {
     );
 
     res.json({
+      token,
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        is_verified: user.is_verified,
+        kyc_tier: user.kyc_tier,
+        two_factor_enabled: user.two_factor_enabled,
+        notif_email: user.notif_email,
+        notif_sms: user.notif_sms,
+        notif_push: user.notif_push,
+        public_profile: user.public_profile,
+        marketing_comms: user.marketing_comms,
+        phone: user.phone,
+        phone_verified: user.phone_verified,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// 2.1 Verify 2FA Login Code Route
+router.post("/verify-2fa", otpLimiter, async (req, res, next) => {
+  const { userId, code } = req.body;
+
+  if (!userId || !code) {
+    return res
+      .status(400)
+      .json({ error: "Please provide user ID and verification code." });
+  }
+
+  try {
+    const otps = await db.query(
+      `SELECT *
+       FROM otp_codes
+       WHERE user_id = ?
+         AND code = ?
+         AND type = 'login_2fa'
+         AND used = 0
+         AND expires_at > NOW()
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [userId, code],
+    );
+
+    if (otps.length === 0) {
+      return res
+        .status(400)
+        .json({ error: "Invalid or expired 2FA verification code." });
+    }
+
+    const otp = otps[0];
+    await db.query("UPDATE otp_codes SET used = 1 WHERE id = ?", [otp.id]);
+
+    const users = await db.query("SELECT * FROM users WHERE id = ?", [userId]);
+    const user = users[0];
+
+    if (!user || user.is_active === 0 || user.deleted_at !== null) {
+      return res.status(403).json({ error: "Account deactivated or not found." });
+    }
+
+    // Create database session record after successful 2FA
+    const tokenJti = crypto.randomUUID();
+    const ua = req.headers["user-agent"] || "";
+    const device = parseUserAgent(ua);
+    const ip =
+      req.headers["x-forwarded-for"]?.split(",")[0].trim() ||
+      req.ip ||
+      req.socket.remoteAddress ||
+      "127.0.0.1";
+    const location = getRequestLocation(req);
+
+    await db.query(
+      "INSERT INTO user_sessions (user_id, token_jti, device, ip_address, location) VALUES (?, ?, ?, ?, ?)",
+      [user.id, tokenJti, device, ip, location],
+    );
+
+    notify({
+      userId: user.id,
+      type: NOTIFICATION_TYPE.SECURITY_ALERT,
+      data: {
+        device: `${device} (2FA Verified)`,
+        time: new Date().toLocaleString(),
+      },
+      email: true,
+      sms: true,
+      push: true,
+    }).catch((err) =>
+      console.error("Failed to trigger Security Alert notification:", err),
+    );
+
+    const token = jwt.sign(
+      { id: user.id, role: user.role, jti: tokenJti },
+      process.env.JWT_SECRET,
+      { expiresIn: process.env.JWT_EXPIRES_IN || "7d" },
+    );
+
+    res.json({
+      message: "2FA verification successful.",
       token,
       user: {
         id: user.id,

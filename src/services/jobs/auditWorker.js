@@ -3,8 +3,8 @@
  * Stage 4 — Background Worker Process & Job Execution Engine
  *
  * Atomically claims queued jobs, executes Stages 1-3 audit pipeline + Stage 4 specialized
- * analyzers, updates progress & phase metrics, handles exponential backoff retries, and
- * recovers crashed/stuck worker jobs.
+ * analyzers with complete evidence context, updates progress & phase metrics, handles
+ * exponential backoff retries, and recovers crashed/stuck worker jobs continuously.
  */
 
 import db from "../../config/db.js";
@@ -13,6 +13,33 @@ import { runAuditPipeline } from "../audit/auditOrchestrator.js";
 import { analyzerRegistry } from "../analyzers/analyzerRegistry.js";
 
 const WORKER_ID = `worker_${process.pid}_${Math.random().toString(36).substring(2, 6)}`;
+let workerLoopInterval = null;
+
+/**
+ * Recovers stuck jobs that were left in 'processing' status due to a process crash or worker failure.
+ */
+export async function recoverStuckWorkerJobs() {
+  try {
+    const timeoutCutoff = new Date(Date.now() - AUDIT_CONFIG.JOB_TIMEOUT_MS);
+    const result = await db.query(
+      `UPDATE audit_jobs
+       SET status = 'queued',
+           phase = 'queued',
+           progress = 0,
+           current_task = 'Recovered from worker timeout/crash',
+           worker_id = NULL,
+           claimed_at = NULL
+       WHERE status = 'processing' AND claimed_at < ?`,
+      [timeoutCutoff]
+    );
+
+    if (result.affectedRows > 0) {
+      console.log(`[auditWorker] Recovered ${result.affectedRows} stuck/crashed audit job(s).`);
+    }
+  } catch (err) {
+    console.error("[auditWorker] Error recovering stuck worker jobs:", err.message);
+  }
+}
 
 /**
  * Atomically claims the next queued or timed-out stuck audit job.
@@ -82,19 +109,58 @@ export async function executeJob(job) {
   const jobId = job.job_id;
 
   try {
-    // Step 1: Validation phase (15%)
-    await updateJobProgress(jobId, 15, "validating", "Validating contractual scope & submission data");
+    // Step 1: Validation & Stages 1-3 AI Audit Pipeline Execution (50%)
+    await updateJobProgress(jobId, 20, "validating", "Validating contractual scope & submission data");
+    await updateJobProgress(jobId, 50, "running_ai_audit", "Executing Stage 3 evidence-based AI audit engine");
 
-    // Step 2: Specialized Analyzers phase (40%)
-    await updateJobProgress(jobId, 40, "running_analyzers", "Executing specialized project analyzers");
+    const auditResult = await runAuditPipeline(job.user_id, {
+      transactionId: job.transaction_id,
+      milestoneId: job.milestone_id,
+      submissionId: job.submission_id,
+    });
+
+    // Step 2: Specialized Stage 4 Analyzers with COMPLETE evidence context (85%)
+    await updateJobProgress(jobId, 85, "running_analyzers", "Executing specialized project analyzers with complete evidence context");
 
     const txRows = await db.query("SELECT category FROM transactions WHERE id = ?", [job.transaction_id]);
     const category = txRows.length ? txRows[0].category : "web";
     const analyzers = analyzerRegistry.getApplicableAnalyzers(category);
+    const hasSpecialized = analyzerRegistry.hasSpecializedAnalyzer(category);
+
+    let submissionData = null;
+    if (job.submission_id) {
+      const subRows = await db.query("SELECT submission_data FROM milestone_submissions WHERE id = ?", [job.submission_id]);
+      if (subRows.length && subRows[0].submission_data) {
+        try {
+          submissionData = typeof subRows[0].submission_data === "string"
+            ? JSON.parse(subRows[0].submission_data)
+            : subRows[0].submission_data;
+        } catch (_) {}
+      }
+    }
+
+    const canonicalAuditContext = {
+      transactionId: job.transaction_id,
+      milestoneId: job.milestone_id,
+      submissionId: job.submission_id,
+      category,
+      scopeRequirements: auditResult.requirements || [],
+      submissionData,
+      stage2EvidenceItems: auditResult.processingSummary?.processedEvidence || [],
+      stage2Findings: auditResult.processingSummary?.findings || [],
+      deterministicChecks: auditResult.deterministicChecks || {},
+      limitations: auditResult.limitations || [],
+      fileTree: auditResult.processingSummary?.fileTree || [],
+      chunks: auditResult.processingSummary?.chunks || [],
+      evidenceHashes: auditResult.processingSummary?.evidenceHashes || {},
+      executionMode: hasSpecialized ? "specialized_analyzer_executed" : "fallback_general_analyzer_executed",
+    };
 
     for (const analyzerFn of analyzers) {
+      // Deep-clone context to guarantee analyzer isolation and immutability
+      const isolatedContext = JSON.parse(JSON.stringify(canonicalAuditContext));
       try {
-        const analyzerRes = await analyzerFn({ stage2Findings: [], fileTree: [], chunks: [] });
+        const analyzerRes = await analyzerFn(isolatedContext);
         if (analyzerRes) {
           await db.query(
             `INSERT INTO analyzer_results
@@ -111,20 +177,25 @@ export async function executeJob(job) {
           );
         }
       } catch (aErr) {
-        console.warn(`[auditWorker] Specialized analyzer warning for job ${jobId}:`, aErr.message);
+        console.error(`[auditWorker] Specialized analyzer failed for job ${jobId}:`, aErr.message);
+        // Record analyzer failure explicitly without fabricating success
+        await db.query(
+          `INSERT INTO analyzer_results
+             (audit_job_id, analyzer_name, analyzer_version, status, findings_json, limitations_json)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          [
+            job.id,
+            "analyzer_error",
+            "1.0.0",
+            "failed",
+            JSON.stringify([{ type: "analyzer_error", severity: "error", description: aErr.message }]),
+            JSON.stringify([`Analyzer execution failed: ${aErr.message}`]),
+          ],
+        );
       }
     }
 
-    // Step 3: Stages 1-3 Audit Pipeline Execution (75%)
-    await updateJobProgress(jobId, 75, "running_ai_audit", "Executing Stage 3 evidence-based AI audit engine");
-
-    const auditResult = await runAuditPipeline(job.user_id, {
-      transactionId: job.transaction_id,
-      milestoneId: job.milestone_id,
-      submissionId: job.submission_id,
-    });
-
-    // Step 4: Completion phase (100%)
+    // Step 3: Completion phase (100%)
     await updateJobProgress(jobId, 100, "completed", "Audit completed successfully");
 
     await db.query(
@@ -201,4 +272,26 @@ export async function processNextWorkerJob() {
   } catch (_) {}
 
   return true;
+}
+
+/**
+ * Starts continuous durable background worker loop and recovers crashed jobs on boot.
+ */
+export function startAuditWorkerLoop(intervalMs = 5000) {
+  if (workerLoopInterval) return;
+
+  // Run initial crash recovery check on boot
+  recoverStuckWorkerJobs().catch((err) =>
+    console.error("[auditWorker] Initial crash recovery error:", err.message)
+  );
+
+  workerLoopInterval = setInterval(async () => {
+    try {
+      await processNextWorkerJob();
+    } catch (err) {
+      console.error("[auditWorker] Background worker tick error:", err.message);
+    }
+  }, intervalMs);
+
+  console.log(`[auditWorker] Durable background audit worker loop started (${WORKER_ID}, interval ${intervalMs}ms).`);
 }

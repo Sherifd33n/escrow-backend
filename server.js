@@ -17,10 +17,15 @@ for (const key of requiredEnv) {
 
 const PORT = process.env.PORT || 4000;
 
+import { startAuditWorkerLoop } from "./src/services/jobs/auditWorker.js";
+
 async function startServer() {
   try {
     // Initialize MySQL Database
     await initDatabase();
+
+    // Start Durable Background Audit Worker Loop
+    startAuditWorkerLoop();
 
     // Start Express Server
     app.listen(PORT, () => {});
