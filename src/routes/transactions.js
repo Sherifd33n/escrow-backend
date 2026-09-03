@@ -420,28 +420,34 @@ router.post("/", async (req, res, next) => {
 
   // 1. KYC requirement check: Level 2 required for escrow creation
   if (entitlements.effectiveLevel < 2) {
+    const msg = "Complete KYC Level 2 identity verification to create escrow transactions.";
     return res.status(403).json({
       code: "KYC_LEVEL_REQUIRED",
       requiredKycLevel: 2,
       currentKycLevel: entitlements.kyc.level,
-      message: "Complete KYC Level 2 to create escrow transactions.",
+      message: msg,
+      error: msg,
     });
   }
 
   // 2. Active deal limit check
   if (entitlements.usage.activeDealsCount >= entitlements.limits.maxActiveDeals) {
+    const msg = `You have reached your limit of active deals (${entitlements.limits.maxActiveDeals}) for your current plan. Please upgrade your subscription plan to create more escrows.`;
     return res.status(403).json({
       code: "ACTIVE_DEAL_LIMIT_REACHED",
       limit: entitlements.limits.maxActiveDeals,
-      message: `You have reached the maximum number of active deals (${entitlements.limits.maxActiveDeals}) for your plan.`,
+      message: msg,
+      error: msg,
     });
   }
 
   // 3. Multi-currency entitlement check
   if (normalizedCurrency !== "USD" && !entitlements.capabilities.canUseMultiCurrency) {
+    const msg = "Multi-currency transactions require a Gold or Diamond subscription plan.";
     return res.status(403).json({
       code: "MULTI_CURRENCY_NOT_AVAILABLE",
-      message: "Multi-currency transactions require a Gold or Diamond plan.",
+      message: msg,
+      error: msg,
     });
   }
 
@@ -466,18 +472,22 @@ router.post("/", async (req, res, next) => {
 
   if (amountInUsd > entitlements.limits.maxEscrowUsd) {
     if (entitlements.subscription.subscriptionTier > entitlements.effectiveLevel) {
+      const msg = `Complete KYC Level ${entitlements.subscription.subscriptionTier} identity verification to unlock your full ${entitlements.subscription.planName} escrow limit.`;
       return res.status(403).json({
         code: "KYC_LEVEL_REQUIRED",
         requiredKycLevel: entitlements.subscription.subscriptionTier,
         currentKycLevel: entitlements.kyc.level,
-        message: `Complete KYC Level ${entitlements.subscription.subscriptionTier} to unlock your ${entitlements.subscription.planName} escrow limit.`,
+        message: msg,
+        error: msg,
       });
     }
+    const msg = `Your ${entitlements.subscription.planName} plan allows up to $${entitlements.limits.maxEscrowUsd.toLocaleString()} per escrow. Please upgrade your subscription plan to create larger escrows.`;
     return res.status(403).json({
       code: "ESCROW_LIMIT_EXCEEDED",
       maxEscrowUsd: entitlements.limits.maxEscrowUsd,
       requestedEscrowUsd: Math.round(amountInUsd),
-      message: `Your ${entitlements.subscription.planName} plan allows up to $${entitlements.limits.maxEscrowUsd.toLocaleString()} per escrow.`,
+      message: msg,
+      error: msg,
     });
   }
 

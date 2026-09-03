@@ -15,6 +15,7 @@
  */
 
 import express from "express";
+import jwt from "jsonwebtoken";
 import db from "../config/db.js";
 import authMiddleware from "../middleware/auth.js";
 import adminOnly from "../middleware/admin.js";
@@ -848,6 +849,45 @@ router.get("/withdrawals", async (req, res, next) => {
     next(error);
   }
 });
+
+/*
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/admin/impersonate/:userId
+// Allows an authenticated admin to generate a session token and view the app
+// as any user without knowing or resetting their password.
+// ─────────────────────────────────────────────────────────────────────────────
+router.post("/impersonate/:userId", async (req, res, next) => {
+  const targetId = req.params.userId;
+  try {
+    const users = await db.query(
+      "SELECT id, name, email, role, phone, phone_verified, kyc_tier, is_verified, is_active, portfolio_url, portfolio_verified, portfolio_status FROM users WHERE id = ? AND deleted_at IS NULL",
+      [targetId]
+    );
+
+    if (users.length === 0) {
+      return res.status(404).json({ error: "User not found or account is deactivated." });
+    }
+
+    const targetUser = users[0];
+
+    const token = jwt.sign(
+      { id: targetUser.id, email: targetUser.email, role: targetUser.role },
+      process.env.JWT_SECRET || "default_jwt_secret",
+      { expiresIn: "7d" }
+    );
+
+    console.log(`[AUDIT] Admin ${req.user.email} (ID: ${req.user.id}) impersonated user ${targetUser.email} (ID: ${targetUser.id})`);
+
+    res.json({
+      message: `Successfully generated session for ${targetUser.email}`,
+      token,
+      user: targetUser,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+*/
 
 export default router;
 

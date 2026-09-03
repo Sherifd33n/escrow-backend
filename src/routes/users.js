@@ -3,6 +3,7 @@ import express from "express";
 import bcrypt from "bcryptjs";
 import db from "../config/db.js";
 import authMiddleware from "../middleware/auth.js";
+import adminOnly from "../middleware/admin.js";
 import { sendVerificationCode, verifyCode } from "../services/sms/twilio.js";
 import { sendOTPEmail } from "../utils/mailer.js";
 import multer from "multer";
@@ -731,15 +732,6 @@ const kycUpload = upload.fields([
   { name: "bizFile", maxCount: 1 },
   { name: "incorpFile", maxCount: 1 },
 ]);
-
-// Admin check middleware
-const adminOnly = (req, res, next) => {
-  if (req.user && req.user.role === "admin") {
-    next();
-  } else {
-    res.status(403).json({ error: "Admin access required." });
-  }
-};
 
 // POST /kyc/submit - Submit KYC files and details
 router.post("/kyc/submit", kycUpload, async (req, res, next) => {
