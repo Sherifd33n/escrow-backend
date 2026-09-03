@@ -15,8 +15,12 @@ export default async function auth(req, res, next) {
       return res.status(401).json({ error: 'No token provided, authorization denied.' });
     }
 
-    // Verify token
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'escrow_super_secret_key_change_in_production_2025');
+    // Verify token strictly using JWT_SECRET
+    if (!process.env.JWT_SECRET) {
+      console.error("[AuthMiddleware] Fatal: JWT_SECRET environment variable is missing.");
+      return res.status(500).json({ error: "Server authentication misconfiguration." });
+    }
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
     // Verify session in DB if it has a JTI claim
     if (decoded.jti) {

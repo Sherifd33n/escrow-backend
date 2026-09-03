@@ -734,3 +734,65 @@ export async function cancelSubscription(userId) {
     autoRenew: false,
   };
 }
+
+/**
+ * Recurring background task to process expired subscriptions and apply pending plan changes/downgrades.
+ */
+export async function processSubscriptionLifecycle() {
+  try {
+    const expiredSubs = await db.query(
+      `SELECT * FROM subscriptions 
+       WHERE status = 'active' AND ends_at IS NOT NULL AND ends_at <= NOW()`
+    );
+
+    for (const sub of expiredSubs) {
+      const conn = await db.getPool().getConnection();
+      try {
+        await conn.beginTransaction();
+
+        if (sub.pending_plan_id) {
+          const newPlanId = sub.pending_plan_id.toLowerCase();
+          const newCycle = sub.pending_billing_cycle || "monthly";
+          const startsAt = new Date();
+          const endsAt = new Date();
+          if (newCycle === "annual") endsAt.setFullYear(endsAt.getFullYear() + 1);
+          else endsAt.setMonth(endsAt.getMonth() + 1);
+
+          await conn.query(
+            `UPDATE subscriptions 
+             SET plan_id = ?, billing_cycle = ?, status = 'active', starts_at = ?, ends_at = ?, pending_plan_id = NULL, pending_billing_cycle = NULL
+             WHERE id = ?`,
+            [newPlanId, newCycle, startsAt, endsAt, sub.id]
+          );
+
+          await conn.query(
+            `INSERT INTO subscriptions_history (user_id, plan_id, billing_cycle, status, starts_at, ends_at)
+             VALUES (?, ?, ?, 'active', ?, ?)`,
+            [sub.user_id, newPlanId, newCycle, startsAt, endsAt]
+          );
+        } else {
+          await conn.query(
+            `UPDATE subscriptions SET status = 'expired' WHERE id = ?`,
+            [sub.id]
+          );
+
+          await conn.query(
+            `INSERT INTO subscriptions_history (user_id, plan_id, billing_cycle, status, starts_at, ends_at)
+             VALUES (?, ?, ?, 'expired', ?, NOW())`,
+            [sub.user_id, sub.plan_id, sub.billing_cycle, sub.starts_at]
+          );
+        }
+
+        await conn.commit();
+      } catch (err) {
+        await conn.rollback();
+        console.error(`[subscriptionService] Error processing expired sub ID ${sub.id}:`, err.message);
+      } finally {
+        conn.release();
+      }
+    }
+  } catch (err) {
+    console.error("[subscriptionService] Subscription lifecycle error:", err.message);
+  }
+}
+

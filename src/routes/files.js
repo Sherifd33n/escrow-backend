@@ -45,7 +45,7 @@ router.get("/{*subpath}", async (req, res, next) => {
     // 2. KYC Upload Authorization
     if (subfolder === "kyc") {
       const kycRows = await db.query(
-        `SELECT id FROM kyc_verifications
+        `SELECT id FROM kyc_submissions
          WHERE user_id = ?
            AND (id_file LIKE ? OR selfie_file LIKE ? OR biz_file LIKE ? OR incorp_file LIKE ?)`,
         [userId, `%${safeBasename}%`, `%${safeBasename}%`, `%${safeBasename}%`, `%${safeBasename}%`]
@@ -65,16 +65,15 @@ router.get("/{*subpath}", async (req, res, next) => {
          LEFT JOIN milestone_submissions s ON s.transaction_id = t.id
          LEFT JOIN evidence_items e ON e.transaction_id = t.id
          WHERE (t.buyer_id = ? OR t.seller_id = ?)
-           AND (s.proof_url LIKE ? OR e.url LIKE ? OR e.file_name LIKE ?)`,
-        [userId, userId, `%${safeBasename}%`, `%${safeBasename}%`, `%${safeBasename}%`]
+           AND (e.storage_path LIKE ? OR e.original_url LIKE ? OR e.file_name LIKE ? OR s.attachments LIKE ? OR s.submission_data LIKE ?)`,
+        [userId, userId, `%${safeBasename}%`, `%${safeBasename}%`, `%${safeBasename}%`, `%${safeBasename}%`, `%${safeBasename}%`]
       );
 
       if (txRows.length > 0) {
         return res.sendFile(targetPath);
       }
 
-      // Allow recent upload if submitted in session
-      return res.sendFile(targetPath);
+      return res.status(403).json({ error: "Access denied: You are not authorized to view this evidence file." });
     }
 
     return res.sendFile(targetPath);

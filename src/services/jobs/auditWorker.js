@@ -11,9 +11,11 @@ import db from "../../config/db.js";
 import { AUDIT_CONFIG } from "../../config/auditConfig.js";
 import { runAuditPipeline } from "../audit/auditOrchestrator.js";
 import { analyzerRegistry } from "../analyzers/analyzerRegistry.js";
+import { processSubscriptionLifecycle } from "../subscriptionService.js";
 
 const WORKER_ID = `worker_${process.pid}_${Math.random().toString(36).substring(2, 6)}`;
 let workerLoopInterval = null;
+let lastSubLifecycleRun = 0;
 
 /**
  * Recovers stuck jobs that were left in 'processing' status due to a process crash or worker failure.
@@ -288,6 +290,14 @@ export function startAuditWorkerLoop(intervalMs = 5000) {
   workerLoopInterval = setInterval(async () => {
     try {
       await processNextWorkerJob();
+
+      // Check subscription lifecycle every 60 seconds
+      if (Date.now() - lastSubLifecycleRun > 60000) {
+        lastSubLifecycleRun = Date.now();
+        processSubscriptionLifecycle().catch((e) =>
+          console.warn("[auditWorker] Periodic subscription lifecycle check failed:", e.message)
+        );
+      }
     } catch (err) {
       console.error("[auditWorker] Background worker tick error:", err.message);
     }

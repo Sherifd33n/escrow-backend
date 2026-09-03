@@ -782,4 +782,21 @@ router.get("/me", authMiddleware, (req, res) => {
   res.json(req.user);
 });
 
+// 8. Logout Route (Revokes current session in user_sessions)
+router.post("/logout", authMiddleware, async (req, res, next) => {
+  try {
+    if (req.sessionJti) {
+      await db.query(
+        "DELETE FROM user_sessions WHERE user_id = ? AND token_jti = ?",
+        [req.user.id, req.sessionJti]
+      );
+    } else {
+      await db.query("DELETE FROM user_sessions WHERE user_id = ?", [req.user.id]);
+    }
+    res.json({ message: "Logged out successfully." });
+  } catch (error) {
+    next(error);
+  }
+});
+
 export default router;

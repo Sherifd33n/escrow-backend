@@ -1421,6 +1421,114 @@ router.patch("/:id/status", async (req, res, next) => {
   }
 });
 
+// 4.1 POST /:id/cancel - Cancel a transaction with full escrow refund
+router.post("/:id/cancel", async (req, res, next) => {
+  const transactionId = req.params.id;
+  const userId = req.user.id;
+  const { reason } = req.body;
+
+  const conn = await db.getPool().getConnection();
+  try {
+    await conn.beginTransaction();
+
+    const [txs] = await conn.query(
+      "SELECT * FROM transactions WHERE id = ? FOR UPDATE",
+      [transactionId]
+    );
+
+    if (txs.length === 0) {
+      await conn.rollback();
+      return res.status(404).json({ error: "Transaction not found." });
+    }
+
+    const tx = txs[0];
+    const isBuyer = tx.buyer_id === userId;
+    const isSeller = tx.seller_id === userId;
+    const isAdmin = req.user.role === "admin";
+
+    if (!isBuyer && !isSeller && !isAdmin) {
+      await conn.rollback();
+      return res.status(403).json({ error: "You are not authorized to cancel this transaction." });
+    }
+
+    if ([TRANSACTION_STATUS.COMPLETED, TRANSACTION_STATUS.CANCELLED].includes(tx.status)) {
+      await conn.rollback();
+      return res.status(400).json({ error: `Transaction is already ${tx.status}.` });
+    }
+
+    if (tx.status === TRANSACTION_STATUS.DISPUTED) {
+      await conn.rollback();
+      return res.status(400).json({ error: "Cannot cancel a transaction currently under dispute." });
+    }
+
+    // Check if work has been submitted
+    const [submissions] = await conn.query(
+      "SELECT id FROM milestone_submissions WHERE transaction_id = ? LIMIT 1",
+      [transactionId]
+    );
+
+    if (submissions.length > 0 && !isAdmin) {
+      await conn.rollback();
+      return res.status(400).json({
+        error: "Work has already been submitted on this transaction. Please file a dispute or request revisions instead.",
+      });
+    }
+
+    const escrowBal = parseFloat(tx.escrow_balance || 0);
+
+    // If escrow is funded, refund the buyer
+    if (escrowBal > 0) {
+      await refundEscrow(tx.id, tx.buyer_id, escrowBal, conn);
+    }
+
+    await conn.query(
+      "UPDATE transactions SET status = ?, updated_at = NOW() WHERE id = ?",
+      [TRANSACTION_STATUS.CANCELLED, transactionId]
+    );
+
+    await conn.query(
+      "UPDATE milestones SET status = 'rejected' WHERE transaction_id = ? AND status IN ('pending', 'upcoming', 'due')",
+      [transactionId]
+    );
+
+    await logTransactionEvent(
+      transactionId,
+      "transaction_cancelled",
+      {
+        cancelled_by: userId,
+        reason: reason || "Cancelled by participant",
+        refunded_amount: escrowBal,
+      },
+      conn
+    );
+
+    await conn.commit();
+
+    notify({
+      userId: isBuyer ? tx.seller_id : tx.buyer_id,
+      type: NOTIFICATION_TYPE.TRANSACTION_CANCELLED || "TRANSACTION_CANCELLED",
+      data: {
+        transaction: tx.title,
+        reason: reason || "Cancelled by other party",
+      },
+      email: true,
+      sms: true,
+      push: true,
+    }).catch((e) => console.warn("[CancelNotification]", e.message));
+
+    res.json({
+      message: "Transaction cancelled successfully.",
+      refundedAmount: escrowBal,
+      status: TRANSACTION_STATUS.CANCELLED,
+    });
+  } catch (err) {
+    await conn.rollback();
+    next(err);
+  } finally {
+    conn.release();
+  }
+});
+
 // 5. POST /:id/milestones - Add a milestone to a transaction
 router.post("/:id/milestones", async (req, res, next) => {
   const transactionId = req.params.id;
