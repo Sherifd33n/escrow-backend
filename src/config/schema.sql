@@ -25,6 +25,8 @@ CREATE TABLE IF NOT EXISTS `users` (
   `portfolio_url` VARCHAR(255) DEFAULT NULL,
   `portfolio_verified` TINYINT(1) NOT NULL DEFAULT 0,
   `portfolio_verified_at` TIMESTAMP NULL DEFAULT NULL,
+  `portfolio_status` ENUM('none', 'pending', 'approved', 'rejected') NOT NULL DEFAULT 'none',
+  `portfolio_rejection_reason` TEXT DEFAULT NULL,
   `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   `updated_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB;

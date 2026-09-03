@@ -288,8 +288,8 @@ router.post("/phone/verify", otpLimiter, async (req, res, next) => {
   }
 });
 
-// POST /portfolio/verify — tests URL reachability and marks portfolio as verified
-router.post("/portfolio/verify", async (req, res, next) => {
+// POST /portfolio/submit (or /portfolio/verify) — validates URL and submits for admin review
+const handlePortfolioSubmit = async (req, res, next) => {
   const userId = req.user.id;
   let { url } = req.body;
 
@@ -329,7 +329,6 @@ router.post("/portfolio/verify", async (req, res, next) => {
       if (response.ok || (response.status >= 300 && response.status < 400)) {
         reachable = true;
       } else {
-        // Some services reject HEAD requests; try GET
         const getController = new AbortController();
         const getTimeout = setTimeout(() => getController.abort(), 7000);
         const getRes = await fetch(url, {
@@ -369,18 +368,82 @@ router.post("/portfolio/verify", async (req, res, next) => {
 
     await db.query(
       `UPDATE users 
-       SET portfolio_url = ?, portfolio_verified = 1, portfolio_verified_at = NOW() 
+       SET portfolio_url = ?, portfolio_status = 'pending', portfolio_verified = 0, portfolio_rejection_reason = NULL 
        WHERE id = ?`,
       [url, userId],
     );
 
     res.json({
-      message: "Portfolio link verified successfully.",
+      message: "Portfolio link submitted for admin review.",
       portfolio_url: url,
-      portfolio_verified: 1,
+      portfolio_status: "pending",
+      portfolio_verified: 0,
     });
   } catch (err) {
     next(err);
+  }
+};
+
+router.post("/portfolio/submit", handlePortfolioSubmit);
+router.post("/portfolio/verify", handlePortfolioSubmit);
+
+// GET /portfolio/queue — Admin: list pending portfolio verification requests
+router.get("/portfolio/queue", adminOnly, async (req, res, next) => {
+  try {
+    const queue = await db.query(
+      `SELECT id, name, email, role, phone, portfolio_url, portfolio_status, portfolio_rejection_reason, updated_at as submitted_at 
+       FROM users 
+       WHERE portfolio_status = 'pending' 
+       ORDER BY updated_at ASC`
+    );
+    res.json(queue);
+  } catch (error) {
+    next(error);
+  }
+});
+
+// PATCH /portfolio/approve/:userId — Admin: approve portfolio verification
+router.patch("/portfolio/approve/:userId", adminOnly, async (req, res, next) => {
+  const targetId = req.params.userId;
+  try {
+    const users = await db.query("SELECT id, name, email FROM users WHERE id = ?", [targetId]);
+    if (users.length === 0) {
+      return res.status(404).json({ error: "User not found." });
+    }
+
+    await db.query(
+      `UPDATE users 
+       SET portfolio_status = 'approved', portfolio_verified = 1, portfolio_verified_at = NOW(), portfolio_rejection_reason = NULL 
+       WHERE id = ?`,
+      [targetId]
+    );
+
+    res.json({ message: "Portfolio approved successfully." });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// PATCH /portfolio/reject/:userId — Admin: reject portfolio verification
+router.patch("/portfolio/reject/:userId", adminOnly, async (req, res, next) => {
+  const targetId = req.params.userId;
+  const { reason } = req.body;
+  try {
+    const users = await db.query("SELECT id, name, email FROM users WHERE id = ?", [targetId]);
+    if (users.length === 0) {
+      return res.status(404).json({ error: "User not found." });
+    }
+
+    await db.query(
+      `UPDATE users 
+       SET portfolio_status = 'rejected', portfolio_verified = 0, portfolio_rejection_reason = ? 
+       WHERE id = ?`,
+      [reason || "Portfolio could not be verified.", targetId]
+    );
+
+    res.json({ message: "Portfolio rejected." });
+  } catch (error) {
+    next(error);
   }
 });
 

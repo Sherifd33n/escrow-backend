@@ -168,6 +168,14 @@ async function runMigrations(conn) {
       name: "portfolio_verified_at",
       definition: "TIMESTAMP NULL DEFAULT NULL",
     },
+    {
+      name: "portfolio_status",
+      definition: "VARCHAR(20) NOT NULL DEFAULT 'none'",
+    },
+    {
+      name: "portfolio_rejection_reason",
+      definition: "TEXT DEFAULT NULL",
+    },
   ];
 
   for (const col of columnsToAdd) {

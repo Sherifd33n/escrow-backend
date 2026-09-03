@@ -36,7 +36,7 @@ export default async function auth(req, res, next) {
 
     // Retrieve user from DB to verify they still exist and get updated information
     const users = await db.query(
-      'SELECT id, name, email, role, phone, phone_verified, phone_verified_at, kyc_tier, is_verified, is_active, deleted_at, two_factor_enabled, notif_email, notif_sms, notif_push, public_profile, marketing_comms, portfolio_url, portfolio_verified, portfolio_verified_at FROM users WHERE id = ?',
+      'SELECT id, name, email, role, phone, phone_verified, phone_verified_at, kyc_tier, is_verified, is_active, deleted_at, two_factor_enabled, notif_email, notif_sms, notif_push, public_profile, marketing_comms, portfolio_url, portfolio_verified, portfolio_verified_at, portfolio_status, portfolio_rejection_reason FROM users WHERE id = ?',
       [decoded.id]
     );
 
