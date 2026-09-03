@@ -288,6 +288,102 @@ router.post("/phone/verify", otpLimiter, async (req, res, next) => {
   }
 });
 
+// POST /portfolio/verify — tests URL reachability and marks portfolio as verified
+router.post("/portfolio/verify", async (req, res, next) => {
+  const userId = req.user.id;
+  let { url } = req.body;
+
+  if (!url || typeof url !== "string") {
+    return res.status(400).json({ error: "Portfolio URL is required." });
+  }
+
+  url = url.trim();
+  if (!/^https?:\/\//i.test(url)) {
+    url = "https://" + url;
+  }
+
+  try {
+    const parsed = new URL(url);
+    if (!parsed.hostname || !parsed.hostname.includes(".")) {
+      return res.status(400).json({
+        error: "Please enter a valid website URL (e.g. github.com/username or yourportfolio.com).",
+      });
+    }
+  } catch {
+    return res.status(400).json({ error: "Invalid URL format." });
+  }
+
+  try {
+    // Check URL reachability with timeout
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 7000);
+    let reachable = false;
+
+    try {
+      const response = await fetch(url, {
+        method: "HEAD",
+        signal: controller.signal,
+        headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Lumbrr/1.0" },
+      });
+      clearTimeout(timeout);
+      if (response.ok || (response.status >= 300 && response.status < 400)) {
+        reachable = true;
+      } else {
+        // Some services reject HEAD requests; try GET
+        const getController = new AbortController();
+        const getTimeout = setTimeout(() => getController.abort(), 7000);
+        const getRes = await fetch(url, {
+          method: "GET",
+          signal: getController.signal,
+          headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" },
+        });
+        clearTimeout(getTimeout);
+        if (getRes.status < 500) {
+          reachable = true;
+        }
+      }
+    } catch (headErr) {
+      clearTimeout(timeout);
+      try {
+        const getController = new AbortController();
+        const getTimeout = setTimeout(() => getController.abort(), 7000);
+        const getRes = await fetch(url, {
+          method: "GET",
+          signal: getController.signal,
+          headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" },
+        });
+        clearTimeout(getTimeout);
+        if (getRes.status < 500) {
+          reachable = true;
+        }
+      } catch (getErr) {
+        // unreachable
+      }
+    }
+
+    if (!reachable) {
+      return res.status(400).json({
+        error: "Unable to reach your portfolio URL. Please ensure it is publicly accessible and online.",
+      });
+    }
+
+    await db.query(
+      `UPDATE users 
+       SET portfolio_url = ?, portfolio_verified = 1, portfolio_verified_at = NOW() 
+       WHERE id = ?`,
+      [url, userId],
+    );
+
+    res.json({
+      message: "Portfolio link verified successfully.",
+      portfolio_url: url,
+      portfolio_verified: 1,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // PATCH /change-password - Change user password
 router.patch("/change-password", async (req, res, next) => {
   const { currentPassword, newPassword } = req.body;

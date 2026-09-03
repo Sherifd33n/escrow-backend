@@ -156,6 +156,18 @@ async function runMigrations(conn) {
       name: "deleted_at",
       definition: "TIMESTAMP NULL DEFAULT NULL",
     },
+    {
+      name: "portfolio_url",
+      definition: "VARCHAR(255) DEFAULT NULL",
+    },
+    {
+      name: "portfolio_verified",
+      definition: "TINYINT(1) NOT NULL DEFAULT 0",
+    },
+    {
+      name: "portfolio_verified_at",
+      definition: "TIMESTAMP NULL DEFAULT NULL",
+    },
   ];
 
   for (const col of columnsToAdd) {
