@@ -175,8 +175,6 @@ router.post("/phone/send-otp", otpLimiter, async (req, res, next) => {
   const rawPhone = req.body.phone || "";
   const phone = normalizePhone(rawPhone);
 
-  console.log(`[phone/send-otp] raw="${rawPhone}" normalized="${phone}"`);
-
   if (!phone) {
     return res.status(400).json({
       error: "Phone number is required.",
@@ -187,7 +185,6 @@ router.post("/phone/send-otp", otpLimiter, async (req, res, next) => {
   const phoneRegex = /^\+234[789]\d{9}$/;
 
   if (!phoneRegex.test(phone)) {
-    console.log(`[phone/send-otp] REJECTED: "${phone}" does not match Nigerian phone pattern`);
     return res.status(400).json({
       error: `Please enter a valid Nigerian phone number (e.g. 0801 234 5678). Received: ${rawPhone}`,
     });

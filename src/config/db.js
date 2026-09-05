@@ -2,6 +2,7 @@ import mysql from "mysql2/promise";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import dns from "dns";
 import dotenv from "dotenv";
 
 dotenv.config();
@@ -20,10 +21,57 @@ const dbConfig = {
 
 let pool;
 
+async function resolveHost(host) {
+  if (!host || host === "localhost" || /^(\d{1,3}\.){3}\d{1,3}$/.test(host)) {
+    return host;
+  }
+  try {
+    const res = await dns.promises.lookup(host);
+    return res.address;
+  } catch (err) {
+    console.warn(`System DNS lookup failed for ${host} (${err.code || err.message}). Trying public DNS fallback (8.8.8.8, 1.1.1.1)...`);
+    try {
+      const resolver = new dns.promises.Resolver();
+      resolver.setServers(["8.8.8.8", "1.1.1.1"]);
+      const addresses = await resolver.resolve4(host);
+      if (addresses && addresses.length > 0) {
+        console.log(`Successfully resolved ${host} to ${addresses[0]} via public DNS.`);
+        return addresses[0];
+      }
+    } catch (fallbackErr) {
+      console.error(`Public DNS fallback failed for ${host}:`, fallbackErr);
+    }
+    return host;
+  }
+}
+
 export async function initDatabase() {
   try {
-    // Connect without database first
-    const connection = await mysql.createConnection(dbConfig);
+    let connection;
+    let activeHost = dbConfig.host;
+    let lastError;
+
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        activeHost = await resolveHost(dbConfig.host);
+        connection = await mysql.createConnection({
+          ...dbConfig,
+          host: activeHost,
+        });
+        break;
+      } catch (err) {
+        lastError = err;
+        console.warn(`Database connection attempt ${attempt}/3 failed: ${err.message}`);
+        if (attempt < 3) {
+          await new Promise((r) => setTimeout(r, 2000));
+        }
+      }
+    }
+
+    if (!connection) {
+      throw lastError;
+    }
+
     console.log("Connected to MySQL server.");
 
     // Create database if not exists
@@ -38,6 +86,7 @@ export async function initDatabase() {
     // Now initialize pool with the database specified
     pool = mysql.createPool({
       ...dbConfig,
+      host: activeHost,
       database: process.env.DB_NAME || "escrow_db",
       waitForConnections: true,
       connectionLimit: 10,
@@ -912,8 +961,43 @@ WHERE is_verified IS NULL;
       ) ENGINE=InnoDB;
     `);
     console.log("Migration: analyzer_results table checked/created.");
+
+    // ----------------------------------------------------
+    // AI DISPUTE ANALYSES TABLE
+    // ----------------------------------------------------
+    await conn.query(`
+      CREATE TABLE IF NOT EXISTS \`ai_dispute_analyses\` (
+        \`id\`                 INT            AUTO_INCREMENT PRIMARY KEY,
+        \`dispute_id\`         INT            NOT NULL,
+        \`transaction_id\`     INT            NOT NULL,
+        \`analysis_version\`   INT            NOT NULL DEFAULT 1,
+        \`recommendation\`     VARCHAR(50)    NOT NULL,
+        \`confidence_score\`   INT            NOT NULL DEFAULT 0,
+        \`summary\`            TEXT           DEFAULT NULL,
+        \`contract_analysis\`  JSON           DEFAULT NULL,
+        \`evidence_evaluation\` JSON          DEFAULT NULL,
+        \`findings\`           JSON           DEFAULT NULL,
+        \`fault_attribution\`  JSON           DEFAULT NULL,
+        \`recommended_split\`  JSON           DEFAULT NULL,
+        \`reasoning\`          TEXT           DEFAULT NULL,
+        \`risk_factors\`       JSON           DEFAULT NULL,
+        \`suggested_action\`   TEXT           DEFAULT NULL,
+        \`model_used\`         VARCHAR(100)   DEFAULT NULL,
+        \`tokens_used\`        INT            DEFAULT 0,
+        \`admin_override\`     BOOLEAN        DEFAULT FALSE,
+        \`admin_decision\`     VARCHAR(50)    DEFAULT NULL,
+        \`admin_feedback\`     TEXT           DEFAULT NULL,
+        \`created_at\`         TIMESTAMP      DEFAULT CURRENT_TIMESTAMP,
+        \`updated_at\`         TIMESTAMP      DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX \`idx_ada_dispute\` (\`dispute_id\`),
+        INDEX \`idx_ada_tx\` (\`transaction_id\`),
+        FOREIGN KEY (\`dispute_id\`) REFERENCES \`disputes\` (\`id\`) ON DELETE CASCADE,
+        FOREIGN KEY (\`transaction_id\`) REFERENCES \`transactions\` (\`id\`) ON DELETE CASCADE
+      ) ENGINE=InnoDB;
+    `);
+    console.log("Migration: ai_dispute_analyses table checked/created.");
   } catch (err) {
-    console.error("Migration failed to create Stage 1/2/3/4 tables:", err);
+    console.error("Migration failed to create Stage 1/2/3/4/Dispute tables:", err);
   }
 
   // ----------------------------------------------------

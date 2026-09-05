@@ -112,12 +112,17 @@ export function runDeterministicChecks({
 
     // Add extracted text/code content from ZIP entries as facts (truncated for prompt safety)
     const zipChunks = stage2Chunks.filter(
-      (c) => (c.source_location || "").includes(".zip") ||
-             (c.source_type || "") === "zip_entry",
+      (c) => {
+        const loc = (c.source_location || "").toLowerCase();
+        const st = (c.source_type || "").toLowerCase();
+        const isZip = loc.includes(".zip") || st === "zip_entry";
+        const isLock = loc.includes("lock") || loc.includes(".min.");
+        return isZip && !isLock;
+      }
     );
     if (zipChunks.length > 0) {
-      const snippetFacts = zipChunks.slice(0, 10).map(
-        (c) => `[ZIP_CONTENT from ${c.source_location || "file"}]: ${(c.content || c.chunk_text || "").slice(0, 400)}`,
+      const snippetFacts = zipChunks.slice(0, 5).map(
+        (c) => `[ZIP_CONTENT from ${c.source_location || "file"}]: ${(c.content || c.chunk_text || "").slice(0, 250).replace(/\s+/g, " ")}`,
       );
       facts.push(...snippetFacts);
     }

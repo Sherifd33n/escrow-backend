@@ -79,12 +79,13 @@ export function detectMagicBytes(buffer) {
     return "webp";
   }
 
-  // 6. ZIP: PK\x03\x04 (0x50 0x4B 0x03 0x04)
+  // 6. ZIP: PK\x03\x04, PK\x05\x06 (empty zip), PK\x07\x08
   if (
     buffer[0] === 0x50 &&
     buffer[1] === 0x4b &&
-    buffer[2] === 0x03 &&
-    buffer[3] === 0x04
+    ((buffer[2] === 0x03 && buffer[3] === 0x04) ||
+     (buffer[2] === 0x05 && buffer[3] === 0x06) ||
+     (buffer[2] === 0x07 && buffer[3] === 0x08))
   ) {
     return "zip";
   }

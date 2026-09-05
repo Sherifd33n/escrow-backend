@@ -60,12 +60,6 @@ async function persistNotification({
   channel,
   metadata,
 }) {
-  const users = await db.query("SELECT id, email FROM users WHERE id = ?", [
-    userId,
-  ]);
-
-  console.log("Notification sees user:", users);
-
   const [result] = await db.getPool().query(
     `INSERT INTO notifications
        (user_id, type, title, message, channel, metadata)

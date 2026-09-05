@@ -27,6 +27,7 @@ import { resolveDispute } from "../services/disputeService.js";
 import { validateSubmissionData } from "../core/submissionValidator.js";
 import { normalizeCategory } from "../constants/serviceCategories.js";
 import { hydrateScope, lockScope } from "../services/scopeService.js";
+import { runDisputeAnalysis } from "../services/disputeAnalysisService.js";
 
 // Apply auth middleware to all routes in this router
 router.use(authMiddleware);
@@ -2597,6 +2598,11 @@ router.post("/:id/dispute", async (req, res, next) => {
       push: true,
     }).catch((err) => console.error("Notification dispatch error:", err));
 
+    // Asynchronously trigger AI dispute analysis in background for Admin review
+    runDisputeAnalysis(disputeId).catch((err) =>
+      console.error("[disputeAnalysis] Auto-analysis failed:", err.message)
+    );
+
     res.status(201).json({
       message: "Dispute filed successfully.",
       disputeId,
@@ -2887,18 +2893,23 @@ const evidenceStorage = multer.diskStorage({
 
 const evidenceUpload = multer({
   storage: evidenceStorage,
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB
+  limits: { fileSize: 30 * 1024 * 1024 }, // 30 MB
   fileFilter: (req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
     const allowedMimes = [
       "image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml",
       "application/pdf",
-      "application/zip", "application/x-zip-compressed",
+      "application/zip", "application/x-zip-compressed", "application/x-zip", "multipart/x-zip",
       "text/plain", "text/markdown",
     ];
-    if (allowedMimes.includes(file.mimetype)) {
+    const allowedExts = [
+      ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg",
+      ".pdf", ".zip", ".txt", ".md",
+    ];
+    if (allowedMimes.includes(file.mimetype) || (allowedExts.includes(ext) && (file.mimetype === "application/octet-stream" || !file.mimetype))) {
       cb(null, true);
     } else {
-      cb(new Error(`File type not allowed: ${file.mimetype}`));
+      cb(new Error(`File type not allowed: ${file.mimetype} (${ext})`));
     }
   },
 });

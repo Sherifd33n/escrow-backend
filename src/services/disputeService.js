@@ -16,15 +16,24 @@ import { TRANSACTION_STATUS } from "../core/transactionStatus.js";
  * @param {number} params.adminId - ID of the admin user resolving the dispute
  * @returns {Promise<object>} Result metadata detailing the resolution outcome
  */
-export async function resolveDispute({ disputeOrTxId, resolution, winner, adminId }) {
+export async function resolveDispute({
+  disputeOrTxId,
+  resolution,
+  winner,
+  adminId,
+  splitDetails = null,
+  aiAnalysisId = null,
+  adminFeedback = null,
+}) {
   if (!resolution || !String(resolution).trim()) {
     const error = new Error("Resolution text is required.");
     error.statusCode = 400;
     throw error;
   }
 
-  if (!["buyer", "seller"].includes(winner)) {
-    const error = new Error('Winner must be either "buyer" or "seller".');
+  const validWinners = ["buyer", "seller", "split"];
+  if (!validWinners.includes(winner)) {
+    const error = new Error('Winner must be "buyer", "seller", or "split".');
     error.statusCode = 400;
     throw error;
   }
@@ -126,51 +135,109 @@ export async function resolveDispute({ disputeOrTxId, resolution, winner, adminI
     }
 
     // 5. Move escrow funds based on winner decision
-    let wallet;
+    let buyerRefundAmount = 0;
+    let sellerReleaseAmount = 0;
+    let buyerWallet = null;
+    let sellerWallet = null;
+
     if (winner === "seller") {
-      const result = await releaseEscrow({
+      sellerReleaseAmount = escrowAmount;
+      const res = await releaseEscrow({
         conn,
         transaction,
         recipientId: transaction.seller_id,
-        amount: escrowAmount,
+        amount: sellerReleaseAmount,
       });
-      wallet = result.wallet;
+      sellerWallet = res.wallet;
 
       await logTransactionEvent({
         conn,
         transactionId: transaction.id,
         userId: adminId,
         action: "escrow_released",
-        note: `Escrow of $${escrowAmount} released to seller (dispute resolved).`,
+        note: `Escrow of $${sellerReleaseAmount} released to seller (dispute resolved).`,
         metadata: {
           disputeId: dispute.id,
           sellerId: transaction.seller_id,
-          walletId: wallet ? wallet.id : null,
-          amount: escrowAmount,
+          walletId: sellerWallet ? sellerWallet.id : null,
+          amount: sellerReleaseAmount,
         },
       });
-    } else {
-      const result = await refundEscrow({
+    } else if (winner === "buyer") {
+      buyerRefundAmount = escrowAmount;
+      const res = await refundEscrow({
         conn,
         transaction,
         buyerId: transaction.buyer_id,
-        amount: escrowAmount,
+        amount: buyerRefundAmount,
       });
-      wallet = result.wallet;
+      buyerWallet = res.wallet;
 
       await logTransactionEvent({
         conn,
         transactionId: transaction.id,
         userId: adminId,
         action: "escrow_refunded",
-        note: `Escrow of $${escrowAmount} refunded to buyer (dispute resolved).`,
+        note: `Escrow of $${buyerRefundAmount} refunded to buyer (dispute resolved).`,
         metadata: {
           disputeId: dispute.id,
           buyerId: transaction.buyer_id,
-          walletId: wallet ? wallet.id : null,
-          amount: escrowAmount,
+          walletId: buyerWallet ? buyerWallet.id : null,
+          amount: buyerRefundAmount,
         },
       });
+    } else if (winner === "split") {
+      const buyerPct = Number(splitDetails?.buyerPercentage ?? 50);
+      buyerRefundAmount = Number(((escrowAmount * buyerPct) / 100).toFixed(2));
+      sellerReleaseAmount = Number((escrowAmount - buyerRefundAmount).toFixed(2));
+
+      if (buyerRefundAmount > 0) {
+        const bRes = await refundEscrow({
+          conn,
+          transaction,
+          buyerId: transaction.buyer_id,
+          amount: buyerRefundAmount,
+        });
+        buyerWallet = bRes.wallet;
+
+        await logTransactionEvent({
+          conn,
+          transactionId: transaction.id,
+          userId: adminId,
+          action: "escrow_refunded",
+          note: `Partial escrow of $${buyerRefundAmount} (${buyerPct}%) refunded to buyer (split dispute resolution).`,
+          metadata: {
+            disputeId: dispute.id,
+            buyerId: transaction.buyer_id,
+            walletId: buyerWallet ? buyerWallet.id : null,
+            amount: buyerRefundAmount,
+          },
+        });
+      }
+
+      if (sellerReleaseAmount > 0) {
+        const sRes = await releaseEscrow({
+          conn,
+          transaction,
+          recipientId: transaction.seller_id,
+          amount: sellerReleaseAmount,
+        });
+        sellerWallet = sRes.wallet;
+
+        await logTransactionEvent({
+          conn,
+          transactionId: transaction.id,
+          userId: adminId,
+          action: "escrow_released",
+          note: `Partial escrow of $${sellerReleaseAmount} (${100 - buyerPct}%) released to seller (split dispute resolution).`,
+          metadata: {
+            disputeId: dispute.id,
+            sellerId: transaction.seller_id,
+            walletId: sellerWallet ? sellerWallet.id : null,
+            amount: sellerReleaseAmount,
+          },
+        });
+      }
     }
 
     // 6. Update dispute status to resolved
@@ -182,8 +249,11 @@ export async function resolveDispute({ disputeOrTxId, resolution, winner, adminI
     // 7. Update milestones status according to dispute winner
     if (winner === "seller") {
       await conn.query("UPDATE milestones SET status = 'approved' WHERE transaction_id = ?", [transaction.id]);
-    } else {
+    } else if (winner === "buyer") {
       await conn.query("UPDATE milestones SET status = 'rejected' WHERE transaction_id = ?", [transaction.id]);
+    } else {
+      // Split: mark approved
+      await conn.query("UPDATE milestones SET status = 'approved' WHERE transaction_id = ?", [transaction.id]);
     }
 
     // 8. Update transaction status to completed and reset escrow balance
@@ -192,7 +262,27 @@ export async function resolveDispute({ disputeOrTxId, resolution, winner, adminI
       [TRANSACTION_STATUS.COMPLETED, transaction.id]
     );
 
-    // 9. Log administrative dispute resolution event
+    // 9. Link & record AI override / adoption if analysis exists
+    try {
+      const [aiRows] = await conn.query(
+        "SELECT * FROM ai_dispute_analyses WHERE dispute_id = ? ORDER BY analysis_version DESC LIMIT 1",
+        [dispute.id]
+      );
+      if (aiRows.length) {
+        const latestAi = aiRows[0];
+        const isOverride = latestAi.recommendation && latestAi.recommendation !== winner;
+        await conn.query(
+          `UPDATE ai_dispute_analyses
+           SET admin_override = ?, admin_decision = ?, admin_feedback = ?
+           WHERE id = ?`,
+          [isOverride, winner, adminFeedback || cleanResolution, latestAi.id]
+        );
+      }
+    } catch (aiErr) {
+      console.warn("[disputeService] Could not update ai_dispute_analyses feedback:", aiErr.message);
+    }
+
+    // 10. Log administrative dispute resolution event
     await logTransactionEvent({
       conn,
       transactionId: transaction.id,
@@ -205,14 +295,15 @@ export async function resolveDispute({ disputeOrTxId, resolution, winner, adminI
         disputeId: dispute.id,
         winner,
         amount: escrowAmount,
-        walletId: wallet ? wallet.id : null,
+        buyerRefundAmount,
+        sellerReleaseAmount,
         resolvedByAdmin: adminId,
       },
     });
 
     await conn.commit();
 
-    // 10. Send notifications
+    // 11. Send notifications
     notify({
       userId: transaction.buyer_id,
       type: NOTIFICATION_TYPE.DISPUTE_RESOLVED,
@@ -239,24 +330,26 @@ export async function resolveDispute({ disputeOrTxId, resolution, winner, adminI
       push: true,
     }).catch((err) => console.error("Notification dispatch error:", err));
 
-    if (winner === "seller") {
+    if (sellerReleaseAmount > 0) {
       notify({
         userId: transaction.seller_id,
         type: NOTIFICATION_TYPE.WALLET_FUNDED,
         data: {
-          amount: escrowAmount.toFixed(2),
-          balance: Number(wallet ? wallet.balance : 0).toFixed(2),
+          amount: sellerReleaseAmount.toFixed(2),
+          balance: Number(sellerWallet ? sellerWallet.balance : 0).toFixed(2),
         },
         email: true,
         sms: true,
         push: true,
       }).catch((err) => console.error("Notification dispatch error:", err));
-    } else {
+    }
+
+    if (buyerRefundAmount > 0) {
       notify({
         userId: transaction.buyer_id,
         type: NOTIFICATION_TYPE.WALLET_REFUNDED,
         data: {
-          amount: escrowAmount.toFixed(2),
+          amount: buyerRefundAmount.toFixed(2),
           transaction: transaction.title,
         },
         email: true,
@@ -269,6 +362,8 @@ export async function resolveDispute({ disputeOrTxId, resolution, winner, adminI
       message: "Dispute resolved successfully.",
       winner,
       amountTransferred: escrowAmount,
+      buyerRefundAmount,
+      sellerReleaseAmount,
       newTransactionStatus: TRANSACTION_STATUS.COMPLETED,
     };
   } catch (error) {

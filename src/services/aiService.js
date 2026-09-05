@@ -11,8 +11,6 @@ const groq = new OpenAI({
 
 const GROQ_MODEL = process.env.GROQ_MODEL || "groq/compound-mini";
 
-console.log("Groq API key loaded:", process.env.GROQ_API_KEY ? "YES" : "NO");
-
 /**
  * Safely extract JSON from an AI response.
  */

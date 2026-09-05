@@ -6,8 +6,12 @@ export default async function auth(req, res, next) {
     let token = null;
     const authHeader = req.headers.authorization;
     if (authHeader && authHeader.startsWith('Bearer ')) {
-      token = authHeader.split(' ')[1];
-    } else if (req.query && req.query.token) {
+      const candidate = authHeader.split(' ')[1];
+      if (candidate && candidate !== 'null' && candidate !== 'undefined') {
+        token = candidate;
+      }
+    }
+    if (!token && req.query && req.query.token && req.query.token !== 'null' && req.query.token !== 'undefined') {
       token = req.query.token;
     }
 

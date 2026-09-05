@@ -492,3 +492,34 @@ CREATE TABLE IF NOT EXISTS `analyzer_results` (
   INDEX `idx_ar_job` (`audit_job_id`),
   FOREIGN KEY (`audit_job_id`) REFERENCES `audit_jobs` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB;
+
+-- AI Dispute Analyses
+CREATE TABLE IF NOT EXISTS `ai_dispute_analyses` (
+  `id`                 INT            AUTO_INCREMENT PRIMARY KEY,
+  `dispute_id`         INT            NOT NULL,
+  `transaction_id`     INT            NOT NULL,
+  `analysis_version`   INT            NOT NULL DEFAULT 1,
+  `recommendation`     VARCHAR(50)    NOT NULL,
+  `confidence_score`   INT            NOT NULL DEFAULT 0,
+  `summary`            TEXT           DEFAULT NULL,
+  `contract_analysis`  JSON           DEFAULT NULL,
+  `evidence_evaluation` JSON          DEFAULT NULL,
+  `findings`           JSON           DEFAULT NULL,
+  `fault_attribution`  JSON           DEFAULT NULL,
+  `recommended_split`  JSON           DEFAULT NULL,
+  `reasoning`          TEXT           DEFAULT NULL,
+  `risk_factors`       JSON           DEFAULT NULL,
+  `suggested_action`   TEXT           DEFAULT NULL,
+  `model_used`         VARCHAR(100)   DEFAULT NULL,
+  `tokens_used`        INT            DEFAULT 0,
+  `admin_override`     BOOLEAN        DEFAULT FALSE,
+  `admin_decision`     VARCHAR(50)    DEFAULT NULL,
+  `admin_feedback`     TEXT           DEFAULT NULL,
+  `created_at`         TIMESTAMP      DEFAULT CURRENT_TIMESTAMP,
+  `updated_at`         TIMESTAMP      DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX `idx_ada_dispute` (`dispute_id`),
+  INDEX `idx_ada_tx` (`transaction_id`),
+  FOREIGN KEY (`dispute_id`) REFERENCES `disputes` (`id`) ON DELETE CASCADE,
+  FOREIGN KEY (`transaction_id`) REFERENCES `transactions` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB;
+

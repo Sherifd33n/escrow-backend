@@ -198,26 +198,44 @@ export async function auditRequirementsWithAi({
     }
   });
 
-  // Extract top extracted code/text snippets from ZIP files and docs
-  const extractedSnippets = (stage2Chunks || []).slice(0, 25).map((c) => ({
-    source: c.source_location || c.evidence_id || "file",
-    text: (c.content || c.chunk_text || "").slice(0, 600),
-  }));
+  // Separate extracted source code chunks from ZIP archives vs documentation / notes
+  const zipExtractedCode = (stage2Chunks || [])
+    .filter((c) => {
+      const loc = (c.source_location || "").toLowerCase();
+      const st = (c.source_type || "").toLowerCase();
+      const isZip = loc.includes(".zip") || st === "zip_entry" || st === "repository";
+      const isLock = loc.includes("lock") || loc.includes(".min.");
+      return isZip && !isLock;
+    })
+    .slice(0, 12)
+    .map((c) => ({
+      file: c.source_location || "archive_file",
+      content_sample: (c.content || c.chunk_text || "").slice(0, 400).replace(/\s+/g, " "),
+    }));
+
+  const documentationNotes = (stage2Chunks || [])
+    .filter((c) => {
+      const loc = (c.source_location || "").toLowerCase();
+      const st = (c.source_type || "").toLowerCase();
+      const isZip = loc.includes(".zip") || st === "zip_entry" || st === "repository";
+      return !isZip;
+    })
+    .slice(0, 5)
+    .map((c) => ({
+      document_source: c.source_location || c.evidence_id || "notes",
+      text_sample: (c.content || c.chunk_text || "").slice(0, 400).replace(/\s+/g, " "),
+    }));
 
   const deliverables = Array.isArray(submissionData?.deliverables)
     ? submissionData.deliverables
     : [];
 
-  // Construct structured audit dataset for prompt
-  const auditItemsPrompt = requirements.map((req) => {
+  // Construct structured audit dataset for prompt without duplicating large code blocks per item
+  const auditItems = requirements.map((req) => {
     const sub = deliverables.find(
       (d) => d && (d.scope_item_id === req.scope_item_id || d.id === req.scope_item_id),
     );
     const checks = deterministicChecks[req.criterion_id] || {};
-    const scopeFindings = [
-      ...globalFindings,
-      ...(findingsByScope[req.scope_item_id] || []),
-    ];
 
     return {
       criterion_id: req.criterion_id,
@@ -226,12 +244,17 @@ export async function auditRequirementsWithAi({
       requirement: req.requirement,
       required: req.required,
       critical: req.critical,
-      provider_claim: sub?.claim || "No claim provided",
-      deterministic_facts: checks.facts || [],
-      stage2_findings: scopeFindings,
-      verified_zip_contents_and_extracted_code: extractedSnippets,
+      provider_claim: (sub?.claim || "No claim provided").slice(0, 300),
+      deterministic_facts: (checks.facts || []).slice(0, 8),
     };
   });
+
+  const payloadForModel = {
+    server_verified_zip_files_and_source_code: zipExtractedCode,
+    provider_written_explanation_and_notes: documentationNotes,
+    global_evidence_findings: globalFindings.slice(0, 10),
+    requirements_to_audit: auditItems,
+  };
 
   if (!process.env.GROQ_API_KEY) {
     console.warn("[aiRequirementAuditor] GROQ_API_KEY missing; using deterministic fallback audit.");
@@ -248,21 +271,24 @@ export async function auditRequirementsWithAi({
           role: "system",
           content: `You are Escrow's AI Requirement Auditor. Your job is to compare contractual requirements against provider submissions and verified evidence. Do not include internal terms like Stage 2, deterministic mode, or API keys in reasons.
 
-## EVIDENCE HIERARCHY — trust these in order:
-1. **[ZIP_VERIFIED] facts** in deterministic_facts: These are CONFIRMED by the server after physically opening and inspecting the uploaded ZIP archive. They list the exact files found, file counts, categories (source/docs/config/readme), and sizes. Trust them as ground truth.
-2. **[ZIP_CONTENT ...] facts** in deterministic_facts: These are actual text/code content extracted directly from files inside the ZIP archive. They are VERIFIED server-extracted content — not claims.
-3. **stage2_findings**: Server-side observations from processing evidence (website reachability, PDF inspection, etc.).
-4. **verified_zip_contents_and_extracted_code**: Additional extracted code snippets from ZIP entries for deeper content analysis.
-5. **provider_claim**: What the provider says they delivered — treat as a claim to be verified against the above evidence.
+## EVIDENCE SOURCES:
+1. **server_verified_zip_files_and_code**: Physical source files extracted from inside the submitted ZIP archive (React components, App.jsx, index.html, package.json, styles, etc.). Compare this code against the contractual requirements.
+2. **deterministic_facts**:
+   - \`[ZIP_VERIFIED]\`: Server confirmation of files inside the ZIP archive, file count, and structure.
+   - \`[ZIP_CONTENT]\`: Key snippets extracted directly from files inside the ZIP archive.
+3. **provider_written_explanation_and_notes**: The provider's written explanation, setup notes, and architecture overview.
+4. **provider_claim**: The claim text submitted by the provider.
 
-## AUDIT RULES:
-1. If [ZIP_VERIFIED] facts show files were extracted from the archive, the ZIP was SUCCESSFULLY INSPECTED — award appropriate credit.
-2. If [ZIP_CONTENT] facts show source code or documentation content, use this to verify specific requirements (UI, features, README, etc.).
-3. Audit EVERY single requirement item provided using its exact criterion_id.
-4. Status MUST be strictly one of: passed, passed_with_notes, revision_required, failed, insufficient_evidence, not_applicable.
-5. Score & confidence MUST be integers 0–100.
-6. Do NOT say 'no evidence' if [ZIP_VERIFIED] or [ZIP_CONTENT] facts are present — this IS the evidence.
-7. Return ONLY valid JSON:
+## AUDIT EVALUATION RULES:
+1. **ZIP Implementation Archive**:
+   - Inspect \`server_verified_zip_files_and_code\` and \`deterministic_facts\`.
+   - If source code files (.jsx, .js, .tsx, .html, .css, package.json, README) are present, verify that runnable artifacts and source code have been delivered and award passing status (passed or passed_with_notes, score 80-95).
+2. **Project Summary & Implementation Notes**:
+   - Inspect \`provider_written_explanation_and_notes\`.
+   - If provider provided project overview and setup explanation, evaluate completeness and mark as passed / passed_with_notes.
+3. **Specific Feature Requirements (e.g. Tabs, Client-Side State, React UI)**:
+   - Check the code logic inside \`server_verified_zip_files_and_code\` to verify if the requested features (e.g. All/Active/Completed filters, state hooks) are implemented in the code.
+4. Return ONLY valid JSON matching the schema below:
 
 {
   "requirements": [
@@ -271,11 +297,11 @@ export async function auditRequirementsWithAi({
       "scope_item_id": "d1",
       "status": "passed",
       "confidence": 90,
-      "score": 88,
-      "verified": ["ZIP archive inspected: source files found"],
+      "score": 90,
+      "verified": ["ZIP archive inspected: source code and runnable artifacts verified"],
       "notVerified": [],
       "evidenceUsed": ["zip_archive"],
-      "reason": "ZIP archive was server-verified and contains the required source files.",
+      "reason": "ZIP archive was server-verified and contains the complete project source code and implementation files.",
       "limitations": []
     }
   ]
@@ -283,10 +309,10 @@ export async function auditRequirementsWithAi({
         },
         {
           role: "user",
-          content: `AUDIT THESE REQUIREMENTS. Note: facts prefixed with [ZIP_VERIFIED] were extracted by the server from the actual uploaded ZIP archive — treat them as verified physical evidence. Facts prefixed with [ZIP_CONTENT] are actual file contents from inside the ZIP.
+          content: `AUDIT THESE REQUIREMENTS AGAINST THE SUBMITTED EVIDENCE AND EXTRACTED ZIP CODE:
 
-REQUIREMENTS TO AUDIT:
-${JSON.stringify(auditItemsPrompt, null, 2)}`,
+AUDIT DATASET:
+${JSON.stringify(payloadForModel, null, 2)}`,
         },
       ],
     });

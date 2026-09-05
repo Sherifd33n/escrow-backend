@@ -36,7 +36,7 @@ import { processWebsite } from "./processors/websiteProcessor.js";
 import { processUnsupported } from "./processors/unsupportedProcessor.js";
 
 const __dirname_pipe = path.dirname(fileURLToPath(import.meta.url));
-const UPLOADS_DIR = path.join(__dirname_pipe, "../../../uploads/evidence");
+const UPLOADS_DIR = path.resolve(path.join(__dirname_pipe, "../../../uploads"));
 
 /**
  * Normalizes raw evidence entries from submission_data JSON into canonical objects.
@@ -60,7 +60,7 @@ export function extractSubmissionEvidenceList(submissionData) {
   const rawList = [];
   const seenIds = new Set();
 
-  // 1. Per-deliverable evidence & inline text/claim extraction
+  // 1. Per-deliverable evidence extraction
   if (Array.isArray(submissionData.deliverables)) {
     submissionData.deliverables.forEach((d, idx) => {
       const scopeItemId = d?.scope_item_id || d?.id || null;
@@ -89,26 +89,6 @@ export function extractSubmissionEvidenceList(submissionData) {
             });
           }
         });
-      }
-
-      // Also extract inline claim / notes text as a text evidence item so AI can inspect code/text submitted inline
-      const inlineText = d?.claim || d?.notes || d?.code || d?.description || "";
-      if (typeof inlineText === "string" && inlineText.trim().length > 3) {
-        const claimId = `e_claim_${scopeItemId || idx}`;
-        if (!seenIds.has(claimId)) {
-          seenIds.add(claimId);
-          rawList.push({
-            id: claimId,
-            scope_item_id: scopeItemId,
-            criterion_id: null,
-            type: "documentation",
-            source_type: "text",
-            label: `Provider Submission Text for ${scopeItemId || idx}`,
-            url: null,
-            file_name: `submission_claim_${scopeItemId || idx}.txt`,
-            description: inlineText.trim(),
-          });
-        }
       }
     });
   }
@@ -157,6 +137,54 @@ export function extractSubmissionEvidenceList(submissionData) {
         }
       }
     });
+  }
+
+  // 4. Auto-discover file and archive URLs in notes or summary if not already in evidence list
+  const textBlob = `${submissionData.provider_notes || ""} ${submissionData.summary || ""} ${submissionData.deliverable_note || ""}`;
+  const urlMatches = textBlob.match(/(https?:\/\/[^\s"'<>]+\.(?:zip|pdf|tar\.gz|tgz|tar|rar|7z)|\/uploads\/[^\s"'<>]+|uploads\/[^\s"'<>]+)/gi);
+  if (urlMatches) {
+    urlMatches.forEach((url, uIdx) => {
+      const cleanUrl = url.replace(/[.,;)]+$/, "");
+      const isZip = cleanUrl.toLowerCase().includes(".zip");
+      const alreadyInList = rawList.some((r) => r.url === cleanUrl);
+      if (!alreadyInList) {
+        const autoId = `e_scanned_${uIdx}`;
+        if (!seenIds.has(autoId)) {
+          seenIds.add(autoId);
+          rawList.push({
+            id: autoId,
+            scope_item_id: isZip ? "d1" : null,
+            criterion_id: null,
+            type: isZip ? "zip" : "link",
+            source_type: cleanUrl.startsWith("http") ? "url" : "file",
+            label: isZip ? "Uploaded ZIP Implementation Archive" : "Submission Reference Link",
+            url: cleanUrl,
+            file_name: path.basename(cleanUrl.split("?")[0]),
+            description: "Discovered from submission notes",
+          });
+        }
+      }
+    });
+  }
+
+  // 5. Extract provider written explanation as text documentation evidence
+  const notesText = submissionData.provider_notes || submissionData.summary;
+  if (typeof notesText === "string" && notesText.trim().length > 10) {
+    const notesId = "e_provider_notes";
+    if (!seenIds.has(notesId)) {
+      seenIds.add(notesId);
+      rawList.push({
+        id: notesId,
+        scope_item_id: "d2",
+        criterion_id: null,
+        type: "documentation",
+        source_type: "text",
+        label: "Project Summary & Implementation Notes (Text Explanation)",
+        url: null,
+        file_name: "provider_notes.txt",
+        description: notesText.trim(),
+      });
+    }
   }
 
   return rawList;
@@ -226,14 +254,23 @@ export async function processSingleEvidence({ transactionId, milestoneId, submis
     const normUrl = String(rawItem.url).replace(/\\/g, "/");
     let candidatePath = null;
 
-    if (normUrl.includes("/uploads/evidence/")) {
-      const rel = normUrl.split("/uploads/evidence/")[1].split("?")[0].split("#")[0];
-      const safeBasename = path.basename(decodeURIComponent(rel));
+    const cleanUrlPart = normUrl.split("?")[0].split("#")[0];
+    const safeBasename = path.basename(decodeURIComponent(cleanUrlPart));
+
+    if (normUrl.includes("uploads/evidence/")) {
       candidatePath = path.join(UPLOADS_DIR, "evidence", safeBasename);
-    } else if (normUrl.includes("/uploads/kyc/")) {
-      const rel = normUrl.split("/uploads/kyc/")[1].split("?")[0].split("#")[0];
-      const safeBasename = path.basename(decodeURIComponent(rel));
+    } else if (normUrl.includes("uploads/kyc/")) {
       candidatePath = path.join(UPLOADS_DIR, "kyc", safeBasename);
+    } else if (normUrl.includes("uploads/")) {
+      candidatePath = path.join(UPLOADS_DIR, safeBasename);
+    }
+
+    // Fallback: check if the file exists in uploads/evidence/ or uploads/
+    if (candidatePath && !fs.existsSync(candidatePath) && safeBasename) {
+      const evPath = path.join(UPLOADS_DIR, "evidence", safeBasename);
+      if (fs.existsSync(evPath)) {
+        candidatePath = evPath;
+      }
     }
 
     if (candidatePath) {
@@ -339,13 +376,11 @@ export async function processSingleEvidence({ transactionId, milestoneId, submis
         break;
 
       case "zip":
-        console.log(`[evidencePipeline] Processing ZIP: evidenceId=${evidenceId}, hasBuffer=${!!fileBuffer}, bufferSize=${fileBuffer?.length || 0}, url=${rawItem.url}`);
         processResult = await processZip({
           buffer: fileBuffer,
           evidenceId,
           fileName: itemData.file_name || path.basename(rawItem.url || "archive.zip"),
         });
-        console.log(`[evidencePipeline] ZIP result: status=${processResult?.status}, files=${processResult?.totalFiles}, chunks=${processResult?.chunks?.length}, findings=${processResult?.findings?.length}`);
         break;
 
       case "repository":

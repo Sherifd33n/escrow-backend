@@ -27,7 +27,8 @@ const MAX_FILE_COUNT = 500;
 const MAX_COMPRESSION_RATIO = 100; // 100x
 
 /**
- * Safely parses PKZIP local file headers directly from a buffer.
+ * Safely parses PKZIP archives by first checking the Central Directory,
+ * falling back to local file headers.
  * Supports Compression Method 0 (Store) and Method 8 (Deflate via zlib).
  *
  * @param {Buffer} buffer
@@ -41,11 +42,97 @@ const MAX_COMPRESSION_RATIO = 100; // 100x
  * }>}
  */
 function parseZipEntries(buffer) {
-  const entries = [];
-  let offset = 0;
+  if (!buffer || buffer.length < 22) return [];
 
+  const entries = [];
+
+  // Strategy 1: Find End of Central Directory (EOCD) record (signature 0x06054b50)
+  let eocdOffset = -1;
+  const maxScan = Math.min(buffer.length - 22, 65557);
+  for (let i = buffer.length - 22; i >= buffer.length - maxScan; i--) {
+    if (
+      buffer[i] === 0x50 &&
+      buffer[i + 1] === 0x4b &&
+      buffer[i + 2] === 0x05 &&
+      buffer[i + 3] === 0x06
+    ) {
+      eocdOffset = i;
+      break;
+    }
+  }
+
+  if (eocdOffset !== -1) {
+    try {
+      const cdOffset = buffer.readUInt32LE(eocdOffset + 16);
+      const cdSize = buffer.readUInt32LE(eocdOffset + 12);
+      let cur = cdOffset;
+      const cdEnd = Math.min(buffer.length, cdOffset + cdSize);
+
+      while (cur < cdEnd - 46) {
+        if (
+          buffer[cur] !== 0x50 ||
+          buffer[cur + 1] !== 0x4b ||
+          buffer[cur + 2] !== 0x01 ||
+          buffer[cur + 3] !== 0x02
+        ) {
+          break;
+        }
+
+        const compMethod = buffer.readUInt16LE(cur + 10);
+        const compSize = buffer.readUInt32LE(cur + 20);
+        const uncompSize = buffer.readUInt32LE(cur + 24);
+        const fileNameLen = buffer.readUInt16LE(cur + 28);
+        const extraLen = buffer.readUInt16LE(cur + 30);
+        const commentLen = buffer.readUInt16LE(cur + 32);
+        const localHeaderOffset = buffer.readUInt32LE(cur + 42);
+
+        const fileName = buffer.toString("utf8", cur + 46, cur + 46 + fileNameLen);
+        const isDir = fileName.endsWith("/") || fileName.endsWith("\\");
+
+        let uncompressedData = null;
+        if (!isDir && compSize > 0 && localHeaderOffset < buffer.length - 30) {
+          try {
+            const localFileNameLen = buffer.readUInt16LE(localHeaderOffset + 26);
+            const localExtraLen = buffer.readUInt16LE(localHeaderOffset + 28);
+            const dataStart = localHeaderOffset + 30 + localFileNameLen + localExtraLen;
+            const dataEnd = dataStart + compSize;
+
+            if (dataEnd <= buffer.length) {
+              const compressedData = buffer.subarray(dataStart, dataEnd);
+              if (compMethod === 0) {
+                uncompressedData = compressedData;
+              } else if (compMethod === 8) {
+                uncompressedData = zlib.inflateRawSync(compressedData);
+              }
+            }
+          } catch (_) {
+            // If inflate fails, uncompressedData remains null
+          }
+        }
+
+        entries.push({
+          fileName,
+          compressionMethod: compMethod,
+          compressedSize: compSize,
+          uncompressedSize: uncompSize,
+          isDir,
+          dataBuffer: uncompressedData,
+        });
+
+        cur += 46 + fileNameLen + extraLen + commentLen;
+      }
+
+      if (entries.length > 0) {
+        return entries;
+      }
+    } catch (_) {
+      // Fallback to local headers scan below
+    }
+  }
+
+  // Strategy 2: Fallback scan of local file headers
+  let offset = 0;
   while (offset < buffer.length - 30) {
-    // Check local header signature: 0x04034b50 ('PK\x03\x04')
     if (
       buffer[offset] !== 0x50 ||
       buffer[offset + 1] !== 0x4b ||
@@ -69,7 +156,6 @@ function parseZipEntries(buffer) {
 
     const rawFileName = buffer.toString("utf8", offset + 30, offset + 30 + fileNameLen);
     const compressedData = buffer.subarray(offset + headerSize, offset + headerSize + compSize);
-
     const isDir = rawFileName.endsWith("/") || rawFileName.endsWith("\\");
 
     let uncompressedData = null;
@@ -80,9 +166,7 @@ function parseZipEntries(buffer) {
         } else if (compMethod === 8) {
           uncompressedData = zlib.inflateRawSync(compressedData);
         }
-      } catch (_) {
-        // If inflate fails, uncompressedData remains null
-      }
+      } catch (_) {}
     }
 
     entries.push({
@@ -94,7 +178,7 @@ function parseZipEntries(buffer) {
       dataBuffer: uncompressedData,
     });
 
-    offset += headerSize + compSize;
+    offset += headerSize + Math.max(compSize, 1);
   }
 
   return entries;
@@ -107,21 +191,24 @@ function parseZipEntries(buffer) {
  * @returns {string} Category name
  */
 function categorizeFilePath(filePath) {
-  const norm = filePath.toLowerCase();
+  const norm = (filePath || "").toLowerCase();
   const base = path.basename(norm);
 
+  if (base.endsWith("-lock.json") || base.endsWith(".lock") || base.endsWith(".min.js") || base.endsWith(".min.css") || base === "package-lock.json" || base === "yarn.lock" || base === "pnpm-lock.yaml" || base === "cargo.lock") {
+    return "lockfiles";
+  }
   if (base.startsWith("readme")) return "readme";
-  if (["package.json", "cargo.toml", "requirements.txt", "pom.xml", "build.gradle", "go.mod"].includes(base)) {
+  if (["package.json", "cargo.toml", "requirements.txt", "pom.xml", "build.gradle", "go.mod", "gemfile", "composer.json"].includes(base)) {
     return "manifests";
   }
-  if (norm.includes("test") || norm.includes("spec")) return "tests";
-  if (base.endsWith(".md") || base.endsWith(".txt") || base.endsWith(".pdf") || norm.includes("/docs/")) {
+  if (norm.includes("test") || norm.includes("spec") || norm.includes("__tests__")) return "tests";
+  if (base.endsWith(".md") || base.endsWith(".txt") || base.endsWith(".pdf") || norm.includes("/docs/") || norm.includes("\\docs\\")) {
     return "docs";
   }
-  if (base.endsWith(".json") || base.endsWith(".yml") || base.endsWith(".yaml") || base.endsWith(".toml") || base.startsWith(".env")) {
+  if (base.endsWith(".json") || base.endsWith(".yml") || base.endsWith(".yaml") || base.endsWith(".toml") || base.startsWith(".env") || base.endsWith(".config.js") || base.endsWith(".config.ts")) {
     return "config";
   }
-  if (/\.(js|ts|jsx|tsx|py|java|cpp|c|h|cs|go|rs|php|rb|html|css|scss|vue|svelte|swift|kt)$/.test(base)) {
+  if (/\.(js|ts|jsx|tsx|py|java|cpp|c|h|cs|go|rs|php|rb|html|css|scss|sass|less|vue|svelte|swift|kt|sql|sh)$/.test(base)) {
     return "source";
   }
 
@@ -307,10 +394,11 @@ export async function processZip({ buffer, evidenceId, fileName = "archive.zip" 
       fileTree.push(fileRecord);
       if (categorized[cat]) categorized[cat].push(fileRecord);
 
-      // Safe Extraction of text content from manifests, docs, readme, and source files
-      if (entry.dataBuffer && (cat === "manifests" || cat === "readme" || cat === "docs" || cat === "config" || cat === "source")) {
-        const textContent = entry.dataBuffer.toString("utf8");
-        if (textContent.length > 0 && textContent.length <= 50000) {
+      // Safe Extraction of text content from manifests, docs, readme, config, tests, and source files
+      if (entry.dataBuffer && (cat === "manifests" || cat === "readme" || cat === "docs" || cat === "config" || cat === "source" || cat === "tests")) {
+        const rawStr = entry.dataBuffer.toString("utf8");
+        const textContent = rawStr.slice(0, 50000);
+        if (textContent.trim().length > 0) {
           const fileChunks = chunkContent({
             content: textContent,
             evidenceId,

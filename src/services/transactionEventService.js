@@ -1,14 +1,17 @@
+import db from "../config/db.js";
+
 export async function logTransactionEvent({
   conn,
   transactionId,
-  userId,
+  userId = null,
   action,
   fromStatus = null,
   toStatus = null,
   note = null,
   metadata = null,
 }) {
-  await conn.query(
+  const runner = conn || db.getPool();
+  await runner.query(
     `
     INSERT INTO transaction_events
     (

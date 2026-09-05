@@ -24,6 +24,11 @@ import { updateTransactionStatus } from "../services/transactionService.js";
 import { notify } from "../services/notificationService.js";
 import { NOTIFICATION_TYPE } from "../constants/notificationTypes.js";
 import { resolveDispute } from "../services/disputeService.js";
+import {
+  runDisputeAnalysis,
+  getDisputeAnalyses,
+  getLatestDisputeAnalysis,
+} from "../services/disputeAnalysisService.js";
 
 const router = express.Router();
 
@@ -529,6 +534,14 @@ router.get("/disputes/:id", async (req, res, next) => {
     const sellerWallet =
       wallets.find((w) => w.user_id === dispute.seller_id) || null;
 
+    // Retrieve AI dispute analysis history & latest record
+    let aiAnalyses = [];
+    try {
+      aiAnalyses = await getDisputeAnalyses(dispute.dispute_id);
+    } catch (aiErr) {
+      console.warn("[admin.js] Could not load AI dispute analyses:", aiErr.message);
+    }
+
     return res.json({
       dispute: {
         id: dispute.dispute_id,
@@ -573,6 +586,42 @@ router.get("/disputes/:id", async (req, res, next) => {
       },
       milestones,
       history: events,
+      ai_analysis: aiAnalyses[0] || null,
+      ai_history: aiAnalyses,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/admin/disputes/:id/ai-analysis
+// Get latest AI dispute analysis and version history
+// ─────────────────────────────────────────────────────────────────────────────
+router.get("/disputes/:id/ai-analysis", async (req, res, next) => {
+  try {
+    const disputeId = req.params.id;
+    const analyses = await getDisputeAnalyses(disputeId);
+    return res.json({
+      latest: analyses[0] || null,
+      history: analyses,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/admin/disputes/:id/ai-analysis
+// Trigger on-demand AI dispute analysis (creates new version)
+// ─────────────────────────────────────────────────────────────────────────────
+router.post("/disputes/:id/ai-analysis", async (req, res, next) => {
+  try {
+    const disputeId = req.params.id;
+    const analysis = await runDisputeAnalysis(disputeId);
+    return res.json({
+      message: "AI dispute analysis completed successfully.",
+      analysis,
     });
   } catch (error) {
     next(error);
@@ -687,7 +736,7 @@ router.patch("/disputes/:id/review", async (req, res, next) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PATCH /api/admin/disputes/:id/resolve
-// Resolve a dispute in favour of buyer or seller.
+// Resolve a dispute in favour of buyer, seller, or split.
 // ─────────────────────────────────────────────────────────────────────────────
 router.patch("/disputes/:id/resolve", async (req, res, next) => {
   try {
@@ -696,6 +745,9 @@ router.patch("/disputes/:id/resolve", async (req, res, next) => {
       resolution: req.body.resolution,
       winner: req.body.winner,
       adminId: req.user.id,
+      splitDetails: req.body.splitDetails,
+      aiAnalysisId: req.body.aiAnalysisId,
+      adminFeedback: req.body.adminFeedback,
     });
     return res.json(result);
   } catch (error) {
