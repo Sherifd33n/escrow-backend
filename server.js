@@ -18,6 +18,7 @@ for (const key of requiredEnv) {
 const PORT = process.env.PORT || 4000;
 
 import { startAuditWorkerLoop } from "./src/services/jobs/auditWorker.js";
+import { startDeadlineWorkerLoop } from "./src/services/jobs/deadlineWorker.js";
 
 async function startServer() {
   try {
@@ -26,6 +27,9 @@ async function startServer() {
 
     // Start Durable Background Audit Worker Loop
     startAuditWorkerLoop();
+
+    // Start Automated Deadline Check Worker Loop
+    startDeadlineWorkerLoop();
 
     // Start Express Server
     app.listen(PORT, () => {

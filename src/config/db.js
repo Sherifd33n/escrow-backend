@@ -468,6 +468,25 @@ WHERE is_verified IS NULL;
   }
 
   // ----------------------------------------------------
+  // KYC SUBMISSIONS TABLE EXTENSION MIGRATION
+  // ----------------------------------------------------
+  try {
+    // Make id_type, id_number, id_file, phone nullable to support business-only verification
+    await conn.query("ALTER TABLE kyc_submissions MODIFY COLUMN phone VARCHAR(50) DEFAULT NULL");
+    await conn.query("ALTER TABLE kyc_submissions MODIFY COLUMN id_type VARCHAR(50) DEFAULT NULL");
+    await conn.query("ALTER TABLE kyc_submissions MODIFY COLUMN id_number VARCHAR(100) DEFAULT NULL");
+    await conn.query("ALTER TABLE kyc_submissions MODIFY COLUMN id_file VARCHAR(255) DEFAULT NULL");
+
+    const [typeCols] = await conn.query("SHOW COLUMNS FROM kyc_submissions LIKE 'submission_type'");
+    if (typeCols.length === 0) {
+      await conn.query("ALTER TABLE kyc_submissions ADD COLUMN `submission_type` ENUM('govt_id', 'business') NOT NULL DEFAULT 'govt_id'");
+      console.log("Migration: Added kyc_submissions.submission_type");
+    }
+  } catch (err) {
+    console.error("Migration failed for kyc_submissions columns:", err);
+  }
+
+  // ----------------------------------------------------
   // SUBSCRIPTIONS TABLE EXTENSION MIGRATION
   // ----------------------------------------------------
   try {
@@ -600,6 +619,7 @@ WHERE is_verified IS NULL;
     { name: "ai_estimated_timeline", definition: "VARCHAR(100) DEFAULT NULL" },
     { name: "agreed_duration", definition: "VARCHAR(100) DEFAULT NULL" },
     { name: "agreed_deadline", definition: "TIMESTAMP NULL DEFAULT NULL" },
+    { name: "deadline_notified_at", definition: "TIMESTAMP NULL DEFAULT NULL" },
     { name: "revision_policy", definition: "VARCHAR(255) DEFAULT '2 rounds of minor revisions'" }
   ];
 

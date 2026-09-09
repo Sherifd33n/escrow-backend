@@ -172,7 +172,7 @@ router.post("/login", authLimiter, async (req, res, next) => {
   try {
     // Find user
     const users = await db.query(
-      "SELECT id, name, email, role, password_hash, is_verified, is_active, deleted_at, kyc_tier, two_factor_enabled, notif_email, notif_sms, notif_push, public_profile, marketing_comms, phone, phone_verified FROM users WHERE email = ?",
+      "SELECT id, name, email, role, password_hash, is_verified, is_active, deleted_at, kyc_tier, two_factor_enabled, notif_email, notif_sms, notif_push, public_profile, marketing_comms, phone, phone_verified, portfolio_url, portfolio_verified, portfolio_verified_at, portfolio_status, portfolio_rejection_reason FROM users WHERE email = ?",
       [email],
     );
     if (users.length === 0) {
@@ -322,6 +322,11 @@ router.post("/login", authLimiter, async (req, res, next) => {
         marketing_comms: user.marketing_comms,
         phone: user.phone,
         phone_verified: user.phone_verified,
+        portfolio_url: user.portfolio_url || "",
+        portfolio_verified: Boolean(user.portfolio_verified),
+        portfolio_verified_at: user.portfolio_verified_at,
+        portfolio_status: user.portfolio_status || (user.portfolio_verified ? "approved" : "none"),
+        portfolio_rejection_reason: user.portfolio_rejection_reason,
       },
     });
   } catch (error) {
@@ -423,6 +428,11 @@ router.post("/verify-2fa", otpLimiter, async (req, res, next) => {
         marketing_comms: user.marketing_comms,
         phone: user.phone,
         phone_verified: user.phone_verified,
+        portfolio_url: user.portfolio_url || "",
+        portfolio_verified: Boolean(user.portfolio_verified),
+        portfolio_verified_at: user.portfolio_verified_at,
+        portfolio_status: user.portfolio_status || (user.portfolio_verified ? "approved" : "none"),
+        portfolio_rejection_reason: user.portfolio_rejection_reason,
       },
     });
   } catch (error) {
@@ -563,6 +573,11 @@ router.post("/verify-otp", otpLimiter, async (req, res, next) => {
         marketing_comms: user.marketing_comms,
         phone: user.phone,
         phone_verified: user.phone_verified,
+        portfolio_url: user.portfolio_url || "",
+        portfolio_verified: Boolean(user.portfolio_verified),
+        portfolio_verified_at: user.portfolio_verified_at,
+        portfolio_status: user.portfolio_status || (user.portfolio_verified ? "approved" : "none"),
+        portfolio_rejection_reason: user.portfolio_rejection_reason,
       },
     });
   } catch (error) {

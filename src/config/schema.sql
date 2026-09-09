@@ -87,6 +87,7 @@ CREATE TABLE IF NOT EXISTS `transactions` (
   `ai_estimated_timeline` VARCHAR(100) DEFAULT NULL,
   `agreed_duration` VARCHAR(100) DEFAULT NULL,
   `agreed_deadline` TIMESTAMP NULL DEFAULT NULL,
+  `deadline_notified_at` TIMESTAMP NULL DEFAULT NULL,
   `revision_policy` VARCHAR(255) DEFAULT '2 rounds of minor revisions',
   `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   `updated_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,

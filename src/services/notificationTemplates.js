@@ -182,6 +182,51 @@ const TEMPLATES = {
     smsText: "Escrow: \"{{transaction}}\" status → {{status}}.",
   },
 
+  [NOTIFICATION_TYPE.TRANSACTION_DEADLINE_REACHED]: {
+    title:        "Project Deadline Reached",
+    message:      "The agreed deadline for \"{{transaction}}\" ({{code}}) has arrived. Please submit your deliverable.",
+    emailSubject: "Action Required: Submission Deadline Reached for {{transaction}} ({{code}})",
+    emailBody: (d) => emailWrap("Project Deadline Reached", `
+      <div style="background-color: #fff9e6; border-left: 4px solid #f59e0b; padding: 16px; border-radius: 4px; margin-bottom: 20px;">
+        <h2 style="margin-top:0; color:#b45309; font-size: 20px;">Project Submission Deadline Reached</h2>
+        <p style="font-size:15px; color:#78350f; line-height:1.6; margin:0;">
+          The agreed contract duration/deadline for <strong>${d.transaction}</strong> (${d.code}) has now been reached.
+        </p>
+      </div>
+      <p style="font-size:15px; color:#374151; line-height:1.8;">
+        Hello <strong>${d.recipientName || "Provider"}</strong>,
+      </p>
+      <p style="font-size:15px; color:#374151; line-height:1.8;">
+        According to the agreed escrow contract terms, the submission deadline for your project <strong>${d.transaction}</strong> is due. Please review your contract and submit your deliverables through your provider dashboard to prevent project delays or disputes.
+      </p>
+      <div style="background-color: #f3f4f6; border-radius: 8px; padding: 16px; margin: 20px 0;">
+        <table style="width: 100%; border-collapse: collapse; font-size: 14px;">
+          <tr>
+            <td style="padding: 6px 0; color: #6b7280; font-weight: 600; width: 140px;">Transaction Code:</td>
+            <td style="padding: 6px 0; color: #111827; font-weight: 700; font-family: monospace;">${d.code}</td>
+          </tr>
+          <tr>
+            <td style="padding: 6px 0; color: #6b7280; font-weight: 600;">Contract Deadline:</td>
+            <td style="padding: 6px 0; color: #dc2626; font-weight: 600;">${d.deadline || "Today"}</td>
+          </tr>
+          <tr>
+            <td style="padding: 6px 0; color: #6b7280; font-weight: 600;">Escrow Amount:</td>
+            <td style="padding: 6px 0; color: #111827; font-weight: 700;">$${d.amount || "0.00"}</td>
+          </tr>
+        </table>
+      </div>
+      <div style="text-align: center; margin: 30px 0;">
+        <a href="${d.dashboardUrl || "http://localhost:5173/dashboard"}" 
+           style="background-color: #001637; color: #ffffff; padding: 12px 28px; text-decoration: none; font-weight: bold; border-radius: 6px; display: inline-block; font-size: 15px;">
+          Open Dashboard & Submit Deliverable
+        </a>
+      </div>
+      <p style="font-size:13px; color:#9ca3af; line-height:1.6; border-top: 1px solid #e5e7eb; padding-top: 16px;">
+        If you have already submitted your milestone deliverables or agreed on an extension with your client, please coordinate directly with the client on the platform.
+      </p>`),
+    smsText: "Lumbrr Alert: The deadline for contract \"{{transaction}}\" ({{code}}) has reached. Please submit your work on the platform.",
+  },
+
   [NOTIFICATION_TYPE.TRANSACTION_COMPLETED]: {
     title:        "Transaction Completed",
     message:      "Transaction \"{{transaction}}\" has been completed successfully.",

@@ -304,7 +304,7 @@ export async function getUserEntitlements(userId) {
     },
     kyc: {
       level: userKycTier,
-      isVerified: user.is_verified === 1 || userKycTier > 1,
+      isVerified: userKycTier > 1,
     },
     effectiveLevel,
     usage: {

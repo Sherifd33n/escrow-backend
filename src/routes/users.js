@@ -156,7 +156,7 @@ router.patch("/profile", async (req, res, next) => {
 
     // Fetch updated user
     const users = await db.query(
-      "SELECT id, name, email, role, phone, phone_verified, phone_verified_at, kyc_tier, is_verified, two_factor_enabled, notif_email, notif_sms, notif_push, public_profile, marketing_comms FROM users WHERE id = ?",
+      "SELECT id, name, email, role, phone, phone_verified, phone_verified_at, kyc_tier, is_verified, two_factor_enabled, notif_email, notif_sms, notif_push, public_profile, marketing_comms, portfolio_url, portfolio_verified, portfolio_verified_at, portfolio_status, portfolio_rejection_reason FROM users WHERE id = ?",
       [userId],
     );
 
@@ -735,12 +735,7 @@ router.post("/kyc/submit", kycUpload, async (req, res, next) => {
   try {
     const { phone, idType, idNum, biz, bizName, bizReg } = req.body;
     const userId = req.user.id;
-
-    if (!phone || !idType || !idNum) {
-      return res
-        .status(400)
-        .json({ error: "Phone, ID type, and ID number are required." });
-    }
+    const isBiz = biz === "true" || biz === true;
 
     const files = req.files || {};
     const idFile = files.idFile
@@ -756,22 +751,16 @@ router.post("/kyc/submit", kycUpload, async (req, res, next) => {
       ? `/uploads/kyc/${files.incorpFile[0].filename}`
       : null;
 
-    if (!idFile) {
-      return res.status(400).json({ error: "ID document upload is required." });
-    }
-
-    const isBiz = biz === "true" || biz === true;
-    if (!isBiz && !selfieFile) {
-      return res.status(400).json({
-        error: "Selfie holding ID is required for personal verification.",
-      });
-    }
+    const userPhone = phone || req.user.phone || null;
 
     if (isBiz) {
-      if (!bizName || !bizReg) {
-        return res.status(400).json({
-          error: "Business name and registration number are required.",
-        });
+      if (!bizName || !bizName.trim()) {
+        return res.status(400).json({ error: "Business name is required." });
+      }
+      if (!bizReg || !bizReg.trim()) {
+        return res
+          .status(400)
+          .json({ error: "Registration / CAC number is required." });
       }
       if (!bizFile) {
         return res
@@ -781,49 +770,76 @@ router.post("/kyc/submit", kycUpload, async (req, res, next) => {
       if (!incorpFile) {
         return res
           .status(400)
-          .json({ error: "Incorporation certificate is required." });
+          .json({ error: "Certificate of Incorporation is required." });
+      }
+
+      // Check if user already has an active pending business submission
+      const existing = await db.query(
+        "SELECT id, status FROM kyc_submissions WHERE user_id = ? AND submission_type = 'business' AND status = 'pending' ORDER BY created_at DESC LIMIT 1",
+        [userId],
+      );
+      if (existing.length > 0) {
+        return res.status(400).json({
+          error: "You already have a business profile verification pending review.",
+        });
+      }
+
+      await db.query(
+        `INSERT INTO kyc_submissions 
+         (user_id, phone, biz_name, biz_reg, biz_file, incorp_file, selfie_file, submission_type, status) 
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'business', 'pending')`,
+        [
+          userId,
+          userPhone,
+          bizName.trim(),
+          bizReg.trim(),
+          bizFile,
+          incorpFile,
+          selfieFile,
+        ],
+      );
+
+      return res.status(201).json({
+        message: "Business profile verification received successfully and is under review.",
+      });
+    } else {
+      if (!idType) {
+        return res.status(400).json({ error: "ID type is required." });
+      }
+      if (!idNum || !idNum.trim()) {
+        return res.status(400).json({ error: "ID number is required." });
+      }
+      if (!idFile) {
+        return res.status(400).json({ error: "ID document upload is required." });
       }
       if (!selfieFile) {
-        return res
-          .status(400)
-          .json({ error: "Selfie holding ID is required." });
+        return res.status(400).json({
+          error: "Selfie holding ID is required for personal verification.",
+        });
       }
-    }
 
-    // Check if there is an active/pending submission for the user
-    const existing = await db.query(
-      "SELECT status FROM kyc_submissions WHERE user_id=? ORDER BY created_at DESC LIMIT 1",
-      [userId],
-    );
+      // Check if user already has an active pending govt_id submission
+      const existing = await db.query(
+        "SELECT id, status FROM kyc_submissions WHERE user_id = ? AND submission_type = 'govt_id' AND status = 'pending' ORDER BY created_at DESC LIMIT 1",
+        [userId],
+      );
+      if (existing.length > 0) {
+        return res.status(400).json({
+          error: "You already have an identity verification pending review.",
+        });
+      }
 
-    if (existing.length && existing[0].status === "pending") {
-      return res.status(400).json({
-        error: "You already have a KYC submission pending review.",
+      await db.query(
+        `INSERT INTO kyc_submissions 
+         (user_id, phone, id_type, id_number, id_file, selfie_file, submission_type, status) 
+         VALUES (?, ?, ?, ?, ?, ?, 'govt_id', 'pending')`,
+        [userId, userPhone, idType, idNum.trim(), idFile, selfieFile],
+      );
+
+      return res.status(201).json({
+        message: "Identity verification received successfully and is under review.",
       });
     }
-
-    // Save submission
-    await db.query(
-      `INSERT INTO kyc_submissions 
-       (user_id, phone, id_type, id_number, id_file, selfie_file, biz_name, biz_reg, biz_file, incorp_file, status) 
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
-      [
-        userId,
-        phone,
-        idType,
-        idNum,
-        idFile,
-        selfieFile,
-        isBiz ? bizName : null,
-        isBiz ? bizReg : null,
-        isBiz ? bizFile : null,
-        isBiz ? incorpFile : null,
-      ],
-    );
-
-    res.status(201).json({
-      message: "KYC submission received successfully and is under review.",
-    });
   } catch (error) {
     if (req.files) {
       Object.values(req.files)
@@ -842,35 +858,56 @@ router.get("/kyc/status", async (req, res, next) => {
   const userId = req.user.id;
   try {
     const userRows = await db.query(
-      "SELECT kyc_tier, is_verified FROM users WHERE id = ?",
+      "SELECT kyc_tier, phone, phone_verified, is_verified FROM users WHERE id = ?",
       [userId]
     );
     const userRow = userRows[0] || {};
     const currentTier = userRow.kyc_tier || 1;
-    const isUserVerified = userRow.is_verified === 1 || userRow.is_verified === true || currentTier > 1;
 
-    const submissions = await db.query(
-      "SELECT id, phone, id_type, id_number, id_file, selfie_file, biz_name, biz_reg, biz_file, incorp_file, status, rejection_reason, created_at FROM kyc_submissions WHERE user_id = ? ORDER BY created_at DESC LIMIT 1",
-      [userId],
+    // Fetch latest govt ID submission
+    const govtRows = await db.query(
+      `SELECT * FROM kyc_submissions 
+       WHERE user_id = ? AND (submission_type = 'govt_id' OR (id_file IS NOT NULL AND submission_type IS NULL))
+       ORDER BY created_at DESC LIMIT 1`,
+      [userId]
     );
 
-    if (submissions.length === 0) {
-      return res.json({
-        status: isUserVerified ? "approved" : "none",
-        tier: currentTier,
-      });
+    // Fetch latest business submission
+    const bizRows = await db.query(
+      `SELECT * FROM kyc_submissions 
+       WHERE user_id = ? AND (submission_type = 'business' OR (biz_file IS NOT NULL AND submission_type IS NULL))
+       ORDER BY created_at DESC LIMIT 1`,
+      [userId]
+    );
+
+    let govtIdStatus = "none";
+    let govtRejectionReason = null;
+    if (govtRows.length > 0) {
+      govtIdStatus = govtRows[0].status; // pending, approved, or rejected
+      if (govtRows[0].status === "rejected") govtRejectionReason = govtRows[0].rejection_reason;
     }
 
-    const sub = submissions[0];
-    let effectiveStatus = sub.status;
-    if (isUserVerified || sub.status === "approved") {
-      effectiveStatus = "approved";
+    let bizStatus = "none";
+    let bizRejectionReason = null;
+    if (bizRows.length > 0) {
+      bizStatus = bizRows[0].status; // pending, approved, or rejected
+      if (bizRows[0].status === "rejected") bizRejectionReason = bizRows[0].rejection_reason;
     }
+
+    const latestSub = (govtRows[0]?.created_at > (bizRows[0]?.created_at || 0)) ? govtRows[0] : (bizRows[0] || govtRows[0] || {});
 
     res.json({
-      ...sub,
-      status: effectiveStatus,
+      ...latestSub,
+      phone: userRow.phone,
       tier: currentTier,
+      govt_id_status: govtIdStatus,
+      govt_rejection_reason: govtRejectionReason,
+      biz_status: bizStatus,
+      biz_rejection_reason: bizRejectionReason,
+      id_type: govtRows[0]?.id_type || "passport",
+      id_number: govtRows[0]?.id_number || "",
+      biz_name: bizRows[0]?.biz_name || "",
+      biz_reg: bizRows[0]?.biz_reg || "",
     });
   } catch (error) {
     next(error);
@@ -943,15 +980,37 @@ router.patch("/kyc", adminOnly, async (req, res, next) => {
 // POST /kyc/reset - Reset current user's KYC submission and status (Testing helper)
 router.post("/kyc/reset", async (req, res, next) => {
   const userId = req.user.id;
+  const { type } = req.body || {}; // 'business' | 'govt_id' | undefined (all)
   const conn = await db.getPool().getConnection();
   try {
     await conn.beginTransaction();
 
-    await conn.query("DELETE FROM kyc_submissions WHERE user_id = ?", [userId]);
-    await conn.query(
-      "UPDATE users SET kyc_tier = 1, is_verified = 0 WHERE id = ?",
-      [userId]
-    );
+    if (type === "business") {
+      await conn.query(
+        "DELETE FROM kyc_submissions WHERE user_id = ? AND (submission_type = 'business' OR (biz_file IS NOT NULL AND submission_type IS NULL))",
+        [userId]
+      );
+      const [govt] = await conn.query(
+        "SELECT id FROM kyc_submissions WHERE user_id = ? AND (submission_type = 'govt_id' OR (id_file IS NOT NULL AND submission_type IS NULL)) AND status = 'approved' LIMIT 1",
+        [userId]
+      );
+      const tier = govt.length > 0 ? 2 : 1;
+      await conn.query("UPDATE users SET kyc_tier = ? WHERE id = ?", [tier, userId]);
+    } else if (type === "govt_id") {
+      await conn.query(
+        "DELETE FROM kyc_submissions WHERE user_id = ? AND (submission_type = 'govt_id' OR (id_file IS NOT NULL AND submission_type IS NULL))",
+        [userId]
+      );
+      const [biz] = await conn.query(
+        "SELECT id FROM kyc_submissions WHERE user_id = ? AND (submission_type = 'business' OR (biz_file IS NOT NULL AND submission_type IS NULL)) AND status = 'approved' LIMIT 1",
+        [userId]
+      );
+      const tier = biz.length > 0 ? 2 : 1;
+      await conn.query("UPDATE users SET kyc_tier = ? WHERE id = ?", [tier, userId]);
+    } else {
+      await conn.query("DELETE FROM kyc_submissions WHERE user_id = ?", [userId]);
+      await conn.query("UPDATE users SET kyc_tier = 1 WHERE id = ?", [userId]);
+    }
 
     await conn.commit();
     res.json({ message: "KYC reset successfully. You can now test identity verification again." });
@@ -985,7 +1044,7 @@ router.patch("/kyc/approve/:id", adminOnly, async (req, res, next) => {
   const adminId = req.user.id;
   try {
     const submissions = await db.query(
-      "SELECT k.*, u.name as user_name FROM kyc_submissions k JOIN users u ON k.user_id = u.id WHERE k.id = ?",
+      "SELECT k.*, u.name as user_name, u.kyc_tier as current_tier FROM kyc_submissions k JOIN users u ON k.user_id = u.id WHERE k.id = ?",
       [submissionId],
     );
     if (submissions.length === 0) {
@@ -995,7 +1054,8 @@ router.patch("/kyc/approve/:id", adminOnly, async (req, res, next) => {
     if (sub.status !== "pending") {
       return res.status(400).json({ error: `Submission is already ${sub.status}.` });
     }
-    const targetTier = sub.biz_name ? 3 : 2;
+
+    const isBusiness = sub.submission_type === "business" || !!sub.biz_name || !!sub.biz_file;
 
     const conn = await db.getPool().getConnection();
     try {
@@ -1007,20 +1067,45 @@ router.patch("/kyc/approve/:id", adminOnly, async (req, res, next) => {
          WHERE id = ?`,
         [adminId, submissionId],
       );
+
+      // Check which verifications are approved for this user
+      const [approvedGovt] = await conn.query(
+        "SELECT id FROM kyc_submissions WHERE user_id = ? AND (submission_type = 'govt_id' OR (id_file IS NOT NULL AND submission_type IS NULL)) AND status = 'approved' LIMIT 1",
+        [sub.user_id],
+      );
+      const [approvedBiz] = await conn.query(
+        "SELECT id FROM kyc_submissions WHERE user_id = ? AND (submission_type = 'business' OR (biz_file IS NOT NULL AND submission_type IS NULL)) AND status = 'approved' LIMIT 1",
+        [sub.user_id],
+      );
+
+      let targetTier = 1;
+      if (approvedGovt.length > 0 && approvedBiz.length > 0) {
+        targetTier = 3;
+      } else if (approvedGovt.length > 0 || approvedBiz.length > 0) {
+        targetTier = 2;
+      }
+
       await conn.query(
         `UPDATE users
-         SET phone = ?, phone_verified = 1, phone_verified_at = NOW(), kyc_tier = ?, is_verified = 1
+         SET kyc_tier = ?
          WHERE id = ?`,
-        [sub.phone, targetTier, sub.user_id],
+        [targetTier, sub.user_id],
       );
+
+      if (sub.phone) {
+        await conn.query(
+          `UPDATE users SET phone = ?, phone_verified = 1, phone_verified_at = COALESCE(phone_verified_at, NOW()) WHERE id = ?`,
+          [sub.phone, sub.user_id],
+        );
+      }
 
       await conn.commit();
 
-      // Fire notification (non-blocking — failure must not roll back the approval)
+      // Fire notification (non-blocking)
       notify({
         userId: sub.user_id,
         type:   NOTIFICATION_TYPE.KYC_APPROVED,
-        data:   { name: sub.user_name },
+        data:   { name: sub.user_name, type: isBusiness ? "Business Profile" : "Government ID" },
         email:  true,
         sms:    false,
         push:   true,
@@ -1049,7 +1134,7 @@ router.patch("/kyc/reject/:id", adminOnly, async (req, res, next) => {
 
   try {
     const submissions = await db.query(
-      "SELECT k.user_id, u.name as user_name FROM kyc_submissions k JOIN users u ON k.user_id = u.id WHERE k.id = ?",
+      "SELECT k.*, u.name as user_name, u.kyc_tier as current_tier FROM kyc_submissions k JOIN users u ON k.user_id = u.id WHERE k.id = ?",
       [submissionId],
     );
     if (submissions.length === 0) {
@@ -1057,6 +1142,7 @@ router.patch("/kyc/reject/:id", adminOnly, async (req, res, next) => {
     }
     const sub = submissions[0];
     const rejectionReason = reason || "Documents were unclear or expired.";
+    const isBusiness = sub.submission_type === "business" || !!sub.biz_name || !!sub.biz_file;
 
     const conn = await db.getPool().getConnection();
     try {
@@ -1068,9 +1154,30 @@ router.patch("/kyc/reject/:id", adminOnly, async (req, res, next) => {
          WHERE id = ?`,
         [rejectionReason, adminId, submissionId],
       );
-      await conn.query("UPDATE users SET kyc_tier = 1, is_verified = 0 WHERE id = ?", [
-        sub.user_id,
-      ]);
+
+      // Re-calculate the proper kyc_tier based on remaining approved submissions
+      const [approvedGovt] = await conn.query(
+        "SELECT id FROM kyc_submissions WHERE user_id = ? AND (submission_type = 'govt_id' OR (id_file IS NOT NULL AND submission_type IS NULL)) AND status = 'approved' LIMIT 1",
+        [sub.user_id],
+      );
+      const [approvedBiz] = await conn.query(
+        "SELECT id FROM kyc_submissions WHERE user_id = ? AND (submission_type = 'business' OR (biz_file IS NOT NULL AND submission_type IS NULL)) AND status = 'approved' LIMIT 1",
+        [sub.user_id],
+      );
+
+      let targetTier = 1;
+      if (approvedGovt.length > 0 && approvedBiz.length > 0) {
+        targetTier = 3;
+      } else if (approvedGovt.length > 0 || approvedBiz.length > 0) {
+        targetTier = 2;
+      }
+
+      await conn.query(
+        `UPDATE users
+         SET kyc_tier = ?
+         WHERE id = ?`,
+        [targetTier, sub.user_id],
+      );
 
       await conn.commit();
 
@@ -1078,7 +1185,7 @@ router.patch("/kyc/reject/:id", adminOnly, async (req, res, next) => {
       notify({
         userId: sub.user_id,
         type:   NOTIFICATION_TYPE.KYC_REJECTED,
-        data:   { name: sub.user_name, reason: rejectionReason },
+        data:   { name: sub.user_name, reason: rejectionReason, type: isBusiness ? "Business Profile" : "Government ID" },
         email:  true,
         sms:    false,
         push:   true,

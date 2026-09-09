@@ -26,7 +26,7 @@ async function run() {
   console.table(subs);
 
   // Reset KYC status for all users (or client users)
-  const [updateRes] = await conn.query("UPDATE users SET kyc_tier = 1, is_verified = 0");
+  const [updateRes] = await conn.query("UPDATE users SET kyc_tier = 1");
   console.log("Updated users count:", updateRes.affectedRows);
 
   const [delRes] = await conn.query("DELETE FROM kyc_submissions");

@@ -10,11 +10,12 @@ export const NOTIFICATION_TYPE = Object.freeze({
   SECURITY_ALERT:    "security_alert",
 
   // Transactions
-  TRANSACTION_CREATED:        "transaction_created",
-  TRANSACTION_FUNDED:         "transaction_funded",
-  TRANSACTION_STARTED:        "transaction_started",
-  TRANSACTION_STATUS_CHANGED: "transaction_status_changed",
-  TRANSACTION_COMPLETED:      "transaction_completed",
+  TRANSACTION_CREATED:          "transaction_created",
+  TRANSACTION_FUNDED:           "transaction_funded",
+  TRANSACTION_STARTED:          "transaction_started",
+  TRANSACTION_STATUS_CHANGED:   "transaction_status_changed",
+  TRANSACTION_DEADLINE_REACHED: "transaction_deadline_reached",
+  TRANSACTION_COMPLETED:        "transaction_completed",
 
   // Milestones
   MILESTONE_DUE:       "milestone_due",
