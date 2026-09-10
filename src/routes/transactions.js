@@ -29,6 +29,7 @@ import { normalizeCategory } from "../constants/serviceCategories.js";
 import { hydrateScope, lockScope } from "../services/scopeService.js";
 import { runDisputeAnalysis } from "../services/disputeAnalysisService.js";
 import { sendInvitationEmail } from "../utils/mailer.js";
+import { parseDurationToMs } from "../services/jobs/deadlineWorker.js";
 
 // Apply auth middleware to all routes in this router
 router.use(authMiddleware);
@@ -554,6 +555,18 @@ router.post("/", async (req, res, next) => {
       attempts++;
       txnCode = `TXN-${Date.now()}-${crypto.randomInt(1000, 9999)}`;
 
+      let safeAgreedDeadline = null;
+      if (agreed_deadline && !isNaN(new Date(agreed_deadline).getTime())) {
+        safeAgreedDeadline = new Date(agreed_deadline);
+      } else if (agreed_duration) {
+        const durationMs = parseDurationToMs(agreed_duration);
+        if (durationMs) {
+          safeAgreedDeadline = new Date(Date.now() + durationMs);
+        }
+      } else if (reviewDays) {
+        safeAgreedDeadline = new Date(Date.now() + reviewDays * 24 * 60 * 60 * 1000);
+      }
+
       try {
         const [txnResult] = await conn.query(
           `INSERT INTO transactions
@@ -575,7 +588,7 @@ router.post("/", async (req, res, next) => {
             parsedScopeJson ? JSON.stringify(parsedScopeJson) : null,
             estimatedTimeline,
             agreed_duration || null,
-            agreed_deadline ? new Date(agreed_deadline) : null,
+            safeAgreedDeadline,
             revPolicy,
           ],
         );
@@ -796,6 +809,18 @@ router.patch("/:id/scope", async (req, res, next) => {
     const escrowFeeRate = parseFloat(tx.escrow_fee_rate || 0.035);
     const escrowFeeAmount = Number((totalAmount * escrowFeeRate).toFixed(2));
 
+    let safeScopeDeadline = null;
+    if (agreed_deadline && !isNaN(new Date(agreed_deadline).getTime())) {
+      safeScopeDeadline = new Date(agreed_deadline);
+    } else if (agreed_duration) {
+      const durationMs = parseDurationToMs(agreed_duration);
+      if (durationMs) {
+        safeScopeDeadline = new Date(Date.now() + durationMs);
+      }
+    } else if (tx.agreed_deadline) {
+      safeScopeDeadline = new Date(tx.agreed_deadline);
+    }
+
     await conn.query(
       `UPDATE transactions SET
         title = ?,
@@ -816,7 +841,7 @@ router.patch("/:id/scope", async (req, res, next) => {
         scopeStr,
         estimatedTimeline,
         agreed_duration || null,
-        agreed_deadline ? new Date(agreed_deadline) : null,
+        safeScopeDeadline,
         revPolicy,
         count,
         escrowFeeAmount,
@@ -2289,6 +2314,18 @@ router.post("/milestones/:id/pay", async (req, res, next) => {
     ]);
 
     if (tx.status === TRANSACTION_STATUS.PENDING) {
+      // If agreed_deadline is not yet set, compute it based on funding time + agreed_duration
+      if (!tx.agreed_deadline && tx.agreed_duration) {
+        const durationMs = parseDurationToMs(tx.agreed_duration);
+        if (durationMs) {
+          const fundedDeadline = new Date(Date.now() + durationMs);
+          await conn.query(
+            "UPDATE transactions SET agreed_deadline = ? WHERE id = ?",
+            [fundedDeadline, tx.id]
+          );
+        }
+      }
+
       await updateTransactionStatus({
         conn,
         transaction: tx,

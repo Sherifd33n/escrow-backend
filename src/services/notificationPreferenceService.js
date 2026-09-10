@@ -27,15 +27,15 @@ export async function getUserNotificationPreferences(userId) {
   );
 
   if (!users.length) {
-    // Safe default — only in-app if user doesn't exist somehow.
-    return { email: false, sms: false, push: false };
+    // Safe default — enable email/in-app for critical notifications if user row is missing
+    return { email: true, sms: false, push: true };
   }
 
   const u = users[0];
 
   return {
-    email: Boolean(u.notif_email),
+    email: u.notif_email === null || u.notif_email === undefined ? true : Boolean(u.notif_email),
     sms:   Boolean(u.notif_sms),
-    push:  Boolean(u.notif_push),
+    push:  u.notif_push === null || u.notif_push === undefined ? true : Boolean(u.notif_push),
   };
 }

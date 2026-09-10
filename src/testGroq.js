@@ -1,5 +1,15 @@
 import OpenAI from "openai";
 import "dotenv/config";
+import dns from "dns";
+
+if (dns.setDefaultResultOrder) {
+  dns.setDefaultResultOrder("ipv4first");
+}
+try {
+  dns.setServers(["8.8.8.8", "1.1.1.1", "8.8.4.4"]);
+} catch (e) {
+  // Ignore in case of restricted environment
+}
 
 const groq = new OpenAI({
   apiKey: process.env.GROQ_API_KEY,

@@ -20,16 +20,34 @@ dotenv.config();
 // ---------------------------------------------------------------------------
 let transporter = null;
 
-if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
-  transporter = nodemailer.createTransport({
-    host:   process.env.SMTP_HOST,
-    port:   Number(process.env.SMTP_PORT || 587),
-    secure: process.env.SMTP_SECURE === "true",
-    auth: {
-      user: process.env.SMTP_USER,
-      pass: process.env.SMTP_PASS,
-    },
-  });
+function getTransporter() {
+  if (!transporter && process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
+    const port = Number(process.env.SMTP_PORT || 587);
+    const secure = process.env.SMTP_SECURE === "true" || port === 465;
+
+    transporter = nodemailer.createTransport({
+      host: process.env.SMTP_HOST,
+      port,
+      secure,
+      auth: {
+        user: process.env.SMTP_USER,
+        pass: process.env.SMTP_PASS,
+      },
+      connectionTimeout: 15000,
+      greetingTimeout: 15000,
+      socketTimeout: 15000,
+    });
+  }
+  return transporter;
+}
+
+export function isEmailConfigured() {
+  return Boolean(
+    process.env.SMTP_HOST &&
+    process.env.SMTP_USER &&
+    process.env.SMTP_PASS &&
+    process.env.SMTP_FROM
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -45,9 +63,11 @@ if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
  * @returns {Promise<boolean>} true on success, false if sending failed.
  */
 export async function sendNotificationEmail(to, subject, html) {
-  if (!transporter) {
+  const activeTransporter = getTransporter();
+
+  if (!activeTransporter) {
     console.warn(
-      "[emailService] SMTP not configured — skipping email to",
+      "[emailService] SMTP not configured (missing SMTP_HOST/USER/PASS) — skipping email to",
       to,
     );
     return false;
@@ -59,21 +79,18 @@ export async function sendNotificationEmail(to, subject, html) {
   }
 
   try {
-    await transporter.sendMail({
-      from:    process.env.SMTP_FROM,
+    const info = await activeTransporter.sendMail({
+      from: process.env.SMTP_FROM,
       to,
       subject,
       html,
     });
 
-    if (process.env.NODE_ENV !== "production") {
-      console.log(`[emailService] Email sent → ${to} | ${subject}`);
-    }
-
+    console.log(`[emailService] Email sent successfully → ${to} | ${subject} (id: ${info?.messageId || "ok"})`);
     return true;
   } catch (err) {
     // Non-fatal — log and continue.
-    console.error("[emailService] Failed to send email to", to, "—", err.message);
+    console.error(`[emailService] Failed to send email to ${to} (${subject}):`, err.message);
     return false;
   }
 }

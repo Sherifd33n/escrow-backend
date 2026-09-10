@@ -19,16 +19,18 @@ if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
     greetingTimeout: 15000,
     socketTimeout: 15000,
   });
+}
 
-  // Verify SMTP connection once when the server starts
-  transporter
-    .verify()
-    .then(() => {
-      console.log("Brevo SMTP connected successfully.");
-    })
-    .catch((error) => {
-      console.error("Failed to connect to Brevo SMTP:", error);
-    });
+export async function verifyMailer() {
+  if (!transporter) return false;
+  try {
+    await transporter.verify();
+    console.log("Brevo SMTP connected successfully.");
+    return true;
+  } catch (error) {
+    console.warn("Brevo SMTP verification notice:", error.message);
+    return false;
+  }
 }
 
 export async function sendOTPEmail(email, code, type = "signup") {

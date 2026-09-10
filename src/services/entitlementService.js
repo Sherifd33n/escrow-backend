@@ -313,14 +313,15 @@ export async function getUserEntitlements(userId) {
     },
     limits: {
       maxEscrowUsd: levelLimits.maxEscrowUsd,
-      maxActiveDeals: levelLimits.maxActiveDeals,
+      // Subscription-based limits: use paid plan config when active, else fall back to level limits
+      maxActiveDeals: isSubActive && planConfig ? planConfig.maxActiveDeals : levelLimits.maxActiveDeals,
       aiAuditsPerMonth: maxAiAudits,
       escrowFeeRate,
-      transactionHistoryMonths: levelLimits.transactionHistoryMonths,
-      apiCallsPerMonth: levelLimits.apiCallsPerMonth,
+      transactionHistoryMonths: isSubActive && planConfig ? planConfig.transactionHistoryMonths : levelLimits.transactionHistoryMonths,
+      apiCallsPerMonth: isSubActive && planConfig ? planConfig.apiCallsPerMonth : levelLimits.apiCallsPerMonth,
     },
     capabilities: {
-      canCreateEscrow: effectiveLevel >= 2 && activeDealsCount < levelLimits.maxActiveDeals,
+      canCreateEscrow: effectiveLevel >= 2 && activeDealsCount < (isSubActive && planConfig ? planConfig.maxActiveDeals : levelLimits.maxActiveDeals),
       canUseSilverServices: isSubActive,
       canUseGoldServices: isSubActive && subscriptionTier >= 3,
       canUseDiamondServices: isSubActive && subscriptionTier >= 4,

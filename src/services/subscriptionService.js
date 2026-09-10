@@ -408,6 +408,37 @@ export async function initiateSubscriptionPayment(userId, planId, billingCycle, 
     // (Subscriptions are denominated in USD, so wallet must be USD)
     // -------------------------------------------------------------------------
     if (walletCurrency === "USD" && availableBalanceUSD >= costUSD) {
+      // --- Duplicate payment guard: prevent double-debit from rapid clicks ---
+      const [recentPayments] = await conn.query(
+        `SELECT p.reference, s.starts_at, s.ends_at FROM payments p
+         JOIN subscriptions s ON s.user_id = p.user_id AND s.status = 'active'
+         WHERE p.user_id = ? AND p.purpose = 'subscription' AND p.provider = 'wallet'
+           AND p.status = 'success' AND p.created_at >= DATE_SUB(NOW(), INTERVAL 60 SECOND)
+           AND JSON_EXTRACT(p.metadata, '$.plan_id') = ?`,
+        [userId, normalizedPlanId]
+      );
+      if (recentPayments.length > 0) {
+        // Already processed — return idempotent success without deducting again
+        await conn.commit();
+        return {
+          success: true,
+          paymentMethod: "wallet",
+          reference: recentPayments[0].reference,
+          planId: normalizedPlanId,
+          planName: targetPlan.name,
+          billingCycle: cycle,
+          amountUsd: costUSD,
+          subscription: {
+            alreadyActivated: true,
+            plan: normalizedPlanId,
+            billingCycle: cycle,
+            startsAt: recentPayments[0].starts_at,
+            endsAt: recentPayments[0].ends_at,
+          },
+          message: `${targetPlan.name} Plan is already active!`,
+        };
+      }
+
       const reference = `SUB-WAL-${Date.now()}-${crypto.randomInt(1000, 9999)}`;
 
       // 1. Deduct subscription cost from wallet balance

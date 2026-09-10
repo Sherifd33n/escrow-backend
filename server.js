@@ -1,11 +1,16 @@
-import app from "./src/app.js";
-import { initDatabase } from "./src/config/db.js";
-import dotenv from "dotenv";
+import "dotenv/config";
+import dns from "dns";
 
-dotenv.config();
+if (dns.setDefaultResultOrder) {
+  dns.setDefaultResultOrder("ipv4first");
+}
+try {
+  dns.setServers(["8.8.8.8", "1.1.1.1", "8.8.4.4"]);
+} catch (e) {
+  // Ignore in case environment restricts custom DNS
+}
 
 /* Validate Required Environment Variables */
-
 const requiredEnv = ["JWT_SECRET", "DB_HOST", "DB_USER", "DB_NAME"];
 
 for (const key of requiredEnv) {
@@ -15,10 +20,12 @@ for (const key of requiredEnv) {
   }
 }
 
-const PORT = process.env.PORT || 4000;
-
+import app from "./src/app.js";
+import { initDatabase } from "./src/config/db.js";
 import { startAuditWorkerLoop } from "./src/services/jobs/auditWorker.js";
 import { startDeadlineWorkerLoop } from "./src/services/jobs/deadlineWorker.js";
+
+const PORT = process.env.PORT || 4000;
 
 async function startServer() {
   try {

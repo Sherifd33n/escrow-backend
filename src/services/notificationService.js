@@ -127,63 +127,61 @@ export async function notify({
     created_at: new Date().toISOString(),
   });
 
-  // 3. Fetch user preferences (non-critical — default to off on error).
-  let prefs = { email: false, sms: false, push: false };
-  try {
-    prefs = await getUserNotificationPreferences(userId);
-  } catch (err) {
-    console.error(
-      "[notificationService] Failed to load user prefs:",
-      err.message,
-    );
-  }
-
-  // 4. Fetch user contact details for email/SMS (only if needed).
+  // 3. Fetch user contact details and notification preferences in a single query
   let userEmail = null;
   let userPhone = null;
   let userName = null;
+  let prefs = { email: true, sms: false, push: true };
 
-  if ((email && prefs.email) || (sms && prefs.sms)) {
-    try {
-      const users = await db.query(
-        "SELECT email, phone, name FROM users WHERE id = ?",
-        [userId],
-      );
-      if (users.length) {
-        userEmail = users[0].email;
-        userPhone = users[0].phone;
-        userName = users[0].name;
-      }
-    } catch (err) {
-      console.error(
-        "[notificationService] Failed to load user contact info:",
-        err.message,
-      );
+  try {
+    const users = await db.query(
+      "SELECT id, name, email, phone, notif_email, notif_sms, notif_push FROM users WHERE id = ?",
+      [userId],
+    );
+
+    if (users && users.length > 0) {
+      const u = users[0];
+      userEmail = u.email;
+      userPhone = u.phone;
+      userName = u.name;
+      prefs = {
+        email: u.notif_email === null || u.notif_email === undefined ? true : Boolean(u.notif_email),
+        sms:   Boolean(u.notif_sms),
+        push:  u.notif_push === null || u.notif_push === undefined ? true : Boolean(u.notif_push),
+      };
     }
+  } catch (err) {
+    console.error(
+      `[notificationService] Failed to load user contact/prefs for userId ${userId}:`,
+      err.message,
+    );
   }
 
   // Merge user name into template data so templates can use {{name}}.
   const tplData = userName ? { name: userName, ...data } : data;
 
-  // 5. Email (non-fatal).
+  // 4. Email (non-fatal).
   if (email && prefs.email && userEmail) {
     const emailContent = buildEmailContent(type, tplData);
     if (emailContent) {
-      // Fire-and-forget — don't await or let failures surface to the caller.
-      sendNotificationEmail(
-        userEmail,
-        emailContent.subject,
-        emailContent.html,
-      ).catch((err) =>
+      try {
+        await sendNotificationEmail(
+          userEmail,
+          emailContent.subject,
+          emailContent.html,
+        );
+      } catch (err) {
         console.error(
-          "[notificationService] Email dispatch error:",
+          `[notificationService] Email dispatch error to ${userEmail}:`,
           err.message,
-        ),
-      );
+        );
+      }
+    } else {
+      console.warn(`[notificationService] No email template found for notification type: ${type}`);
     }
   }
 
-  // 6. SMS (non-fatal).
+  // 5. SMS (non-fatal).
   if (sms && prefs.sms && userPhone) {
     const smsText = buildSmsContent(type, tplData);
     if (smsText) {
@@ -193,7 +191,7 @@ export async function notify({
     }
   }
 
-  // 7. Push (non-fatal).
+  // 6. Push (non-fatal).
   if (push && prefs.push) {
     sendPushNotification({ userId, title, message, data: tplData }).catch(
       (err) =>
