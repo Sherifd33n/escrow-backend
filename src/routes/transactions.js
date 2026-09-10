@@ -28,6 +28,7 @@ import { validateSubmissionData } from "../core/submissionValidator.js";
 import { normalizeCategory } from "../constants/serviceCategories.js";
 import { hydrateScope, lockScope } from "../services/scopeService.js";
 import { runDisputeAnalysis } from "../services/disputeAnalysisService.js";
+import { sendInvitationEmail } from "../utils/mailer.js";
 
 // Apply auth middleware to all routes in this router
 router.use(authMiddleware);
@@ -508,12 +509,18 @@ router.post("/", async (req, res, next) => {
       [normalizedCounterpartyEmail],
     );
     if (cUsers.length === 0) {
-      return rollbackWithError(
-        conn,
-        res,
-        404,
-        `Counterparty user with email "${normalizedCounterpartyEmail}" not found.`,
-      );
+      await conn.rollback();
+      // Send invitation email to the unregistered counterparty (fire-and-forget)
+      const inviterName = req.user.name || "A Lumbrr Escrow user";
+      try {
+        await sendInvitationEmail(normalizedCounterpartyEmail, inviterName);
+      } catch (mailErr) {
+        console.error("Failed to send invitation email:", mailErr);
+      }
+      return res.status(404).json({
+        code: "INVITATION_SENT",
+        error: `The user "${normalizedCounterpartyEmail}" is not yet registered on Lumbrr. An invitation email has been sent to them. Once they sign up, you can create this transaction.`,
+      });
     }
     const counterpartyId = cUsers[0].id;
 
