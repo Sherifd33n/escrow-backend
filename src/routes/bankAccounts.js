@@ -30,8 +30,33 @@ router.get("/banks", async (req, res, next) => {
     }
 
     const rawBanks = await paystackService.getBanks("nigeria");
-    const banks = rawBanks
-      .filter((b) => b.active)
+    
+    // Top priority popular banks
+    const topBankCodes = new Set([
+      "044", // Access Bank
+      "058", // GTBank
+      "057", // Zenith Bank
+      "011", // First Bank
+      "033", // UBA
+      "50211", // Kuda Bank
+      "999992", // OPay
+      "999991", // PalmPay
+      "50515", // Moniepoint
+      "221", // Stanbic IBTC
+      "070", // Fidelity Bank
+      "214", // FCMB
+      "232", // Sterling Bank
+      "035", // Wema Bank
+      "050", // Ecobank
+      "076", // Polaris Bank
+      "032", // Union Bank
+      "101", // Providus Bank
+      "301", // Jaiz Bank
+      "082", // Keystone Bank
+    ]);
+
+    const activeBanks = (Array.isArray(rawBanks) ? rawBanks : [])
+      .filter((b) => b && b.active !== false)
       .map((b) => ({
         id: b.code,
         name: b.name,
@@ -39,10 +64,19 @@ router.get("/banks", async (req, res, next) => {
         slug: b.slug,
       }));
 
-    bankListCache = banks;
+    // Sort: Top banks first, then remaining banks alphabetically
+    activeBanks.sort((a, b) => {
+      const aIsTop = topBankCodes.has(a.code);
+      const bIsTop = topBankCodes.has(b.code);
+      if (aIsTop && !bIsTop) return -1;
+      if (!aIsTop && bIsTop) return 1;
+      return a.name.localeCompare(b.name);
+    });
+
+    bankListCache = activeBanks;
     bankListCacheTime = now;
 
-    res.json({ banks });
+    res.json({ banks: activeBanks });
   } catch (error) {
     next(error);
   }
