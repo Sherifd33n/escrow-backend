@@ -67,29 +67,37 @@ export async function runAuditPipeline(
     auditType,
   });
 
-  // Step 2: Load & process Stage 2 evidence findings
+  // Step 2: Load & process Stage 2 evidence findings, extracted files & fingerprint
   const stage2Analysis = await analyzeSubmissionEvidence({
     transactionId: numTxId,
     milestoneId: snapshot.milestoneId,
     submissionId: snapshot.submissionId,
   });
 
-  // Step 3: Run deterministic objective checks per requirement
+  const contractScope = `${title} (${type}): ${JSON.stringify(snapshot.requirements.map(r => r.requirement))}`;
+
+  // Step 3: Run deterministic objective checks per requirement with project mismatch detection
   const deterministicChecksMap = runDeterministicChecks({
     requirements: snapshot.requirements,
     submissionData: snapshot.submissionData,
     stage2EvidenceItems: stage2Analysis.processedEvidence,
     stage2Findings: stage2Analysis.findings,
     stage2Chunks: stage2Analysis.chunks,
+    extractedFiles: stage2Analysis.extractedFiles || [],
+    projectFingerprint: stage2Analysis.projectFingerprint || null,
+    contractScope,
   });
 
-  // Step 4: AI Requirement-by-Requirement reasoning
+  // Step 4: AI Requirement-by-Requirement reasoning with deep evidence provenance
   const rawAiResults = await auditRequirementsWithAi({
     requirements: snapshot.requirements,
     submissionData: snapshot.submissionData,
     deterministicChecks: deterministicChecksMap,
     stage2Findings: stage2Analysis.findings,
     stage2Chunks: stage2Analysis.chunks,
+    extractedFiles: stage2Analysis.extractedFiles || [],
+    projectFingerprint: stage2Analysis.projectFingerprint || null,
+    contractScope,
   });
 
   // Step 5: Enforce 100% requirement coverage
@@ -119,6 +127,8 @@ export async function runAuditPipeline(
     };
   });
 
+  const hasMismatch = Object.values(deterministicChecksMap).some((dc) => dc && dc.projectMismatch);
+
   // Step 7: Persist immutable audit record in ai_audits table
   const auditRecord = {
     transaction_id: numTxId,
@@ -136,6 +146,8 @@ export async function runAuditPipeline(
       requirements: auditedRequirements,
       missing_requirements: auditedRequirements.filter((r) => r.status === "failed" || r.status === "insufficient_evidence"),
       deterministic_checks: deterministicChecksMap,
+      project_fingerprint: stage2Analysis.projectFingerprint || null,
+      project_mismatch: hasMismatch,
     }),
     release_eligible: verdict.releaseEligible ? 1 : 0,
     release_decision: verdict.releaseDecision,
@@ -147,6 +159,7 @@ export async function runAuditPipeline(
       evidenceCount: snapshot.evidenceItems.length,
     }),
   };
+
 
   let auditId = null;
   try {

@@ -1,27 +1,19 @@
-/**
- * deterministicChecks.js
- * Stage 3 — Deterministic Objective Checks Layer
- *
- * Performs objective backend checks per requirement before calling the AI:
- *   - submissionExists
- *   - evidenceExists
- *   - evidenceProcessed
- *   - evidenceHashVerified
- *   - urlReachable
- *   - testExecuted & testPassed
- *   - contradictionDetected (mismatch between claims vs Stage 2 facts)
- *
- * Produces deterministic facts to feed the AI prompt & final policy engine.
- */
+import { compareProjectIdentity } from "../evidence/projectFingerprinter.js";
+import { matchRequirementsToEvidence } from "../evidence/requirementMatcher.js";
 
 /**
- * Runs deterministic checks for every contractual requirement using Stage 2 evidence findings.
+ * Runs deterministic checks for every contractual requirement using Stage 2 evidence findings,
+ * extracted code files, and deep project fingerprinting.
  *
  * @param {object} params
  * @param {Array<object>} params.requirements       - Flattened requirement list
- * @param {object|null} params.submissionData       - Phase 1 canonical submission_data JSON
- * @param {Array<object>} params.stage2EvidenceItems - Processed evidence_items rows
- * @param {Array<object>} params.stage2Findings      - Processed evidence_findings rows
+ * @param {object|null} params.submissionData       - Canonical submission_data JSON
+ * @param {Array<object>} [params.stage2EvidenceItems=[]] - Processed evidence_items rows
+ * @param {Array<object>} [params.stage2Findings=[]]      - Processed evidence_findings rows
+ * @param {Array<object>} [params.stage2Chunks=[]]        - Extracted chunks
+ * @param {Array<object>} [params.extractedFiles=[]]      - Extracted file contents
+ * @param {object|null}   [params.projectFingerprint=null]- Detected project fingerprint
+ * @param {string|object} [params.contractScope=""]       - Transaction scope / title / category
  * @returns {Record<string, {
  *   criterion_id: string,
  *   scope_item_id: string,
@@ -29,6 +21,11 @@
  *   evidenceExists: boolean,
  *   evidenceProcessed: boolean,
  *   evidenceHashVerified: boolean,
+ *   codeEvidenceFound: boolean,
+ *   projectMismatch: boolean,
+ *   projectMismatchDetails?: string,
+ *   matchedFilesCount: number,
+ *   matchedSymbols: Array<string>,
  *   urlReachable: boolean,
  *   testExecuted: boolean,
  *   testPassed: boolean,
@@ -42,6 +39,9 @@ export function runDeterministicChecks({
   stage2EvidenceItems = [],
   stage2Findings = [],
   stage2Chunks = [],
+  extractedFiles = [],
+  projectFingerprint = null,
+  contractScope = "",
 }) {
   const results = {};
 
@@ -53,9 +53,25 @@ export function runDeterministicChecks({
 
   const testingInfo = submissionData?.testing || {};
 
+  // 1. Run Project Identity Comparison against Contract
+  const identityComparison = compareProjectIdentity({
+    expectedScope: contractScope,
+    requirements,
+    detectedFingerprint: projectFingerprint,
+  });
+
+  // 2. Run Requirement-to-Evidence Matcher across all extracted files
+  const reqMatches = matchRequirementsToEvidence({
+    requirements,
+    files: extractedFiles,
+    chunks: stage2Chunks,
+    projectFingerprint,
+  });
+
   requirements.forEach((req) => {
     const criterionId = req.criterion_id;
     const scopeItemId = req.scope_item_id;
+    const reqMatch = reqMatches[criterionId] || { matchedFiles: [], matchedSymbols: [], matchedRoutes: [], evidenceSnippets: [] };
 
     const facts = [];
 
@@ -72,7 +88,6 @@ export function runDeterministicChecks({
     }
 
     // 2. Check evidence linked to this scope item or submission
-    // Project-wide evidence (ZIP archives, repositories, documentation) applies to ALL requirements
     const reqEvidence = stage2EvidenceItems.filter(
       (e) =>
         !e.scope_item_id ||
@@ -84,7 +99,6 @@ export function runDeterministicChecks({
         (e.original_url && e.original_url.toLowerCase().endsWith(".zip")),
     );
     const evidenceExists = reqEvidence.length > 0;
-
     const processedEvidence = reqEvidence.filter((e) => e.processing_status === "processed");
     const evidenceProcessed = processedEvidence.length > 0;
 
@@ -100,34 +114,28 @@ export function runDeterministicChecks({
       facts.push("No supporting evidence items attached.");
     }
 
-    // 3. Extract ZIP file tree and content facts from Stage 2 findings
-    const zipSummaryFindings = stage2Findings.filter(
-      (f) => f.finding_type === "zip_archive_summary" || f.finding_type === "zip_file_list" || f.finding_type === "zip_categorization",
-    );
-    if (zipSummaryFindings.length > 0) {
-      zipSummaryFindings.forEach((f) => {
-        facts.push(`[ZIP_VERIFIED] ${f.finding_text}`);
-      });
+    // 3. Project Identity Mismatch Facts
+    let contradictionDetected = false;
+    if (identityComparison.projectMismatch) {
+      contradictionDetected = true;
+      facts.push(`[PROJECT_IDENTITY_MISMATCH] Critical mismatch: Contract expected "${identityComparison.expectedDomain}", but submitted project is "${identityComparison.detectedDomain}". ${identityComparison.reasons.join(" ")}`);
+    } else if (projectFingerprint?.primaryDomain?.name) {
+      facts.push(`[PROJECT_FINGERPRINT] Detected application type: "${projectFingerprint.primaryDomain.name}" (${projectFingerprint.primaryDomain.confidence}% confidence).`);
     }
 
-    // Add extracted text/code content from ZIP entries as facts (truncated for prompt safety)
-    const zipChunks = stage2Chunks.filter(
-      (c) => {
-        const loc = (c.source_location || "").toLowerCase();
-        const st = (c.source_type || "").toLowerCase();
-        const isZip = loc.includes(".zip") || st === "zip_entry";
-        const isLock = loc.includes("lock") || loc.includes(".min.");
-        return isZip && !isLock;
+    // 4. Code Evidence Verification for this specific requirement
+    const codeEvidenceFound = reqMatch.matchedFiles.length > 0;
+    if (codeEvidenceFound) {
+      const topFilesStr = reqMatch.matchedFiles.map((f) => f.path).join(", ");
+      facts.push(`[CODE_EVIDENCE_MATCH] Relevant source files found for requirement: [${topFilesStr}].`);
+      if (reqMatch.matchedSymbols.length > 0) {
+        facts.push(`[CODE_SYMBOLS_MATCH] Relevant symbols found: [${reqMatch.matchedSymbols.join(", ")}].`);
       }
-    );
-    if (zipChunks.length > 0) {
-      const snippetFacts = zipChunks.slice(0, 5).map(
-        (c) => `[ZIP_CONTENT from ${c.source_location || "file"}]: ${(c.content || c.chunk_text || "").slice(0, 250).replace(/\s+/g, " ")}`,
-      );
-      facts.push(...snippetFacts);
+    } else if (extractedFiles.length > 0) {
+      facts.push("[CODE_EVIDENCE_GAP] No relevant source files, symbols, or components identified matching this requirement.");
     }
 
-    // 4. Check staging site / website reachability findings
+    // 5. Staging site / website reachability findings
     const websiteFindings = stage2Findings.filter(
       (f) => f.finding_type === "website_reachability" && f.finding_text.includes("Reachable: true"),
     );
@@ -136,11 +144,10 @@ export function runDeterministicChecks({
       facts.push("Staging site verified reachable (HTTP 200 OK).");
     }
 
-    // 5. Evidence Classification & Independent Testing Verification
+    // 6. Evidence Classification & Independent Testing Verification
     const providerReported = !!testingInfo.performed;
     const testSummaryText = (testingInfo.summary || "").toLowerCase();
 
-    // Check if Stage 2 findings contain actual test reports, logs, or CI execution output artifacts
     const testArtifactFindings = stage2Findings.filter(
       (f) =>
         f.finding_type === "test_report" ||
@@ -150,32 +157,22 @@ export function runDeterministicChecks({
     );
     const evidenceBacked = testArtifactFindings.length > 0;
 
-    // Check if platform executed tests independently (or trusted runner verified execution)
     const independentVerifiedFindings = stage2Findings.filter(
       (f) => f.finding_type === "independent_test_verified" && f.finding_text.includes("Verified: true"),
     );
     const independentlyVerified = independentVerifiedFindings.length > 0;
 
-    // A provider claiming tests passed is provider-reported evidence, NOT proof of execution
     const testExecuted = independentlyVerified || evidenceBacked;
     const testPassed = independentlyVerified;
 
     if (providerReported) {
       facts.push(`[PROVIDER_REPORTED] Testing claimed by provider: "${testingInfo.summary || "Tests executed"}". (Self-reported, not independently verified).`);
     }
-
     if (evidenceBacked) {
       facts.push(`[EVIDENCE_BACKED] Test execution artifact/log verified (${testArtifactFindings.length} item(s)).`);
     }
 
-    if (!independentlyVerified) {
-      facts.push("[INDEPENDENT_TESTING] Independent test execution: Not verified.");
-    } else {
-      facts.push("[INDEPENDENT_TESTING] Independent test execution: PASSED & VERIFIED.");
-    }
-
-    // 6. Contradiction Detection
-    let contradictionDetected = false;
+    // 7. Contradiction Detection
     const claim = (subDeliverable?.claim || "").toLowerCase();
 
     // Contradiction 1: Claim asserts 100% tests pass, but provider summary notes failure
@@ -187,13 +184,16 @@ export function runDeterministicChecks({
       facts.push("CONTRADICTION DETECTED: Claim asserts all tests passed, but testing findings report failures.");
     }
 
-    // Contradiction 2: Claim asserts completion, but Stage 2 found security block or missing endpoint
-    const blockedFindings = stage2Findings.filter(
-      (f) => f.finding_type.includes("block") || f.finding_type.includes("error"),
-    );
-    if (submissionExists && blockedFindings.length > 0 && reqEvidence.length === 0) {
+    // Contradiction 2: Claim asserts completion for a specific feature, but extracted code shows project mismatch
+    if (identityComparison.projectMismatch && submissionExists) {
       contradictionDetected = true;
-      facts.push("CONTRADICTION DETECTED: Completion claimed without supporting evidence.");
+      facts.push(`CONTRADICTION DETECTED: Provider claims completion, but submitted code represents an unrelated project (${identityComparison.detectedDomain}).`);
+    }
+
+    // Contradiction 3: Claim asserts completion, but 0 files were extracted or found
+    if (submissionExists && extractedFiles.length === 0 && reqEvidence.length === 0) {
+      contradictionDetected = true;
+      facts.push("CONTRADICTION DETECTED: Completion claimed without supporting source code evidence.");
     }
 
     results[criterionId] = {
@@ -203,6 +203,11 @@ export function runDeterministicChecks({
       evidenceExists,
       evidenceProcessed,
       evidenceHashVerified,
+      codeEvidenceFound,
+      projectMismatch: identityComparison.projectMismatch,
+      projectMismatchDetails: identityComparison.projectMismatch ? identityComparison.reasons[0] : null,
+      matchedFilesCount: reqMatch.matchedFiles.length,
+      matchedSymbols: reqMatch.matchedSymbols,
       urlReachable,
       providerReportedTesting: providerReported,
       evidenceBackedTesting: evidenceBacked,
@@ -216,3 +221,4 @@ export function runDeterministicChecks({
 
   return results;
 }
+

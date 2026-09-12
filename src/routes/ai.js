@@ -123,6 +123,8 @@ router.post("/audit", async (req, res, next) => {
   try {
     const { transactionId, milestoneId, submissionId, title, type, amount, currency, counterparty } = req.body;
 
+    console.log(`[AI Audit] Starting audit for tx=${transactionId}, milestone=${milestoneId}, sub=${submissionId}`);
+
     const audit = await runAiAudit(req.user.id, {
       transactionId,
       milestoneId,
@@ -134,11 +136,14 @@ router.post("/audit", async (req, res, next) => {
       counterparty: counterparty || "Vendor",
     });
 
+    console.log(`[AI Audit] Completed audit for tx=${transactionId}, score=${audit?.score}, status=${audit?.status}`);
+
     res.json({
       success: true,
       audit: sanitizeAuditObject(audit),
     });
   } catch (error) {
+    console.error(`[AI Audit] ERROR for tx=${req.body?.transactionId}:`, error?.message || error);
     if (error.statusCode) {
       return res.status(error.statusCode).json({
         error: error.message,
@@ -147,7 +152,11 @@ router.post("/audit", async (req, res, next) => {
         aiAuditsUsed: error.aiAuditsUsed,
       });
     }
-    next(error);
+    // Catch-all: always send a response so the frontend never hangs
+    return res.status(500).json({
+      error: error.message || "AI audit failed unexpectedly. Please try again.",
+      code: "AUDIT_INTERNAL_ERROR",
+    });
   }
 });
 

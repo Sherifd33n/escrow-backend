@@ -7,9 +7,11 @@ import { runAuditPipeline } from "./audit/auditOrchestrator.js";
 const groq = new OpenAI({
   apiKey: process.env.GROQ_API_KEY || "dummy_groq_key",
   baseURL: "https://api.groq.com/openai/v1",
+  timeout: 15000,
+  maxRetries: 0,
 });
 
-const GROQ_MODEL = process.env.GROQ_MODEL || "groq/compound-mini";
+const GROQ_MODEL = process.env.GROQ_MODEL || "openai/gpt-oss-120b";
 
 /**
  * Safely extract JSON from an AI response.

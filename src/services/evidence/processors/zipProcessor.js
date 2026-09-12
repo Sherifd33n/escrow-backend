@@ -184,32 +184,98 @@ function parseZipEntries(buffer) {
   return entries;
 }
 
+import { generateProjectFingerprint } from "../projectFingerprinter.js";
+import { calculateSha256 } from "../hasher.js";
+
 /**
- * Categorizes a file path into source, config, docs, manifests, tests, or readme.
+ * Normalizes file path and checks if it belongs to an ignored/generated folder.
+ */
+function isIgnoredPath(filePath) {
+  const norm = (filePath || "").toLowerCase().replace(/\\/g, "/");
+  return (
+    norm.includes("node_modules/") ||
+    norm.includes(".git/") ||
+    norm.includes("dist/") ||
+    norm.includes("build/") ||
+    norm.includes("coverage/") ||
+    norm.includes(".next/") ||
+    norm.includes(".cache/") ||
+    norm.includes(".turbo/") ||
+    norm.includes("vendor/") ||
+    norm.includes("__pycache__/")
+  );
+}
+
+/**
+ * Detects programming/markup language from file extension.
+ */
+function detectLanguage(filePath) {
+  const ext = path.extname(filePath || "").toLowerCase();
+  const map = {
+    ".js": "javascript",
+    ".jsx": "javascript",
+    ".mjs": "javascript",
+    ".cjs": "javascript",
+    ".ts": "typescript",
+    ".tsx": "typescript",
+    ".html": "html",
+    ".htm": "html",
+    ".css": "css",
+    ".scss": "scss",
+    ".sass": "sass",
+    ".less": "less",
+    ".json": "json",
+    ".md": "markdown",
+    ".txt": "text",
+    ".yaml": "yaml",
+    ".yml": "yaml",
+    ".xml": "xml",
+    ".sql": "sql",
+    ".py": "python",
+    ".java": "java",
+    ".php": "php",
+    ".go": "go",
+    ".rb": "ruby",
+    ".rs": "rust",
+    ".swift": "swift",
+    ".kt": "kotlin",
+    ".dart": "dart",
+    ".vue": "vue",
+    ".svelte": "svelte",
+    ".sh": "shell",
+  };
+  return map[ext] || "unknown";
+}
+
+/**
+ * Categorizes a file path into source, config, docs, manifests, tests, readme, or assets.
  *
  * @param {string} filePath
  * @returns {string} Category name
  */
 function categorizeFilePath(filePath) {
-  const norm = (filePath || "").toLowerCase();
+  const norm = (filePath || "").toLowerCase().replace(/\\/g, "/");
   const base = path.basename(norm);
 
   if (base.endsWith("-lock.json") || base.endsWith(".lock") || base.endsWith(".min.js") || base.endsWith(".min.css") || base === "package-lock.json" || base === "yarn.lock" || base === "pnpm-lock.yaml" || base === "cargo.lock") {
     return "lockfiles";
   }
   if (base.startsWith("readme")) return "readme";
-  if (["package.json", "cargo.toml", "requirements.txt", "pom.xml", "build.gradle", "go.mod", "gemfile", "composer.json"].includes(base)) {
+  if (["package.json", "cargo.toml", "requirements.txt", "pom.xml", "build.gradle", "go.mod", "gemfile", "composer.json", "pubspec.yaml", "app.json"].includes(base)) {
     return "manifests";
   }
   if (norm.includes("test") || norm.includes("spec") || norm.includes("__tests__")) return "tests";
-  if (base.endsWith(".md") || base.endsWith(".txt") || base.endsWith(".pdf") || norm.includes("/docs/") || norm.includes("\\docs\\")) {
+  if (base.endsWith(".md") || base.endsWith(".txt") || base.endsWith(".pdf") || norm.includes("/docs/") || norm.includes("/doc/")) {
     return "docs";
   }
-  if (base.endsWith(".json") || base.endsWith(".yml") || base.endsWith(".yaml") || base.endsWith(".toml") || base.startsWith(".env") || base.endsWith(".config.js") || base.endsWith(".config.ts")) {
+  if (base.endsWith(".json") || base.endsWith(".yml") || base.endsWith(".yaml") || base.endsWith(".toml") || base.startsWith(".env") || base.endsWith(".config.js") || base.endsWith(".config.ts") || base.endsWith(".config.mjs")) {
     return "config";
   }
-  if (/\.(js|ts|jsx|tsx|py|java|cpp|c|h|cs|go|rs|php|rb|html|css|scss|sass|less|vue|svelte|swift|kt|sql|sh)$/.test(base)) {
+  if (/\.(js|ts|jsx|tsx|mjs|cjs|py|java|cpp|c|h|cs|go|rs|php|rb|html|css|scss|sass|less|vue|svelte|swift|kt|dart|sql|sh)$/.test(base)) {
     return "source";
+  }
+  if (/\.(png|jpg|jpeg|gif|svg|ico|webp|mp4|webm|pdf|woff|woff2|ttf|eot)$/.test(base)) {
+    return "assets";
   }
 
   return "other";
@@ -228,6 +294,8 @@ function categorizeFilePath(filePath) {
  *   totalFiles: number,
  *   totalUncompressedSize: number,
  *   fileTree: Array<object>,
+ *   extractedFiles: Array<object>,
+ *   projectFingerprint: object,
  *   categorized: object,
  *   findings: Array<object>,
  *   chunks: Array<object>,
@@ -243,6 +311,8 @@ export async function processZip({ buffer, evidenceId, fileName = "archive.zip" 
       totalFiles: 0,
       totalUncompressedSize: 0,
       fileTree: [],
+      extractedFiles: [],
+      projectFingerprint: null,
       categorized: {},
       findings: [],
       chunks: [],
@@ -258,6 +328,8 @@ export async function processZip({ buffer, evidenceId, fileName = "archive.zip" 
       totalFiles: 0,
       totalUncompressedSize: 0,
       fileTree: [],
+      extractedFiles: [],
+      projectFingerprint: null,
       categorized: {},
       findings: [],
       chunks: [],
@@ -273,6 +345,8 @@ export async function processZip({ buffer, evidenceId, fileName = "archive.zip" 
       totalFiles: rawEntries.length,
       totalUncompressedSize: 0,
       fileTree: [],
+      extractedFiles: [],
+      projectFingerprint: null,
       categorized: {},
       findings: [
         {
@@ -288,6 +362,7 @@ export async function processZip({ buffer, evidenceId, fileName = "archive.zip" 
 
   let totalUncompressedSize = 0;
   const fileTree = [];
+  const extractedFiles = [];
   const categorized = {
     source: [],
     config: [],
@@ -295,6 +370,8 @@ export async function processZip({ buffer, evidenceId, fileName = "archive.zip" 
     manifests: [],
     tests: [],
     readme: [],
+    assets: [],
+    lockfiles: [],
     other: [],
   };
   const findings = [];
@@ -309,7 +386,7 @@ export async function processZip({ buffer, evidenceId, fileName = "archive.zip" 
   } catch (_) {}
 
   for (const entry of rawEntries) {
-    const entryName = entry.fileName;
+    const entryName = (entry.fileName || "").replace(/\\/g, "/");
 
     // Security Check 2: Path Traversal Defense
     if (
@@ -324,6 +401,8 @@ export async function processZip({ buffer, evidenceId, fileName = "archive.zip" 
         totalFiles: rawEntries.length,
         totalUncompressedSize: 0,
         fileTree: [],
+        extractedFiles: [],
+        projectFingerprint: null,
         categorized: {},
         findings: [
           {
@@ -347,6 +426,8 @@ export async function processZip({ buffer, evidenceId, fileName = "archive.zip" 
           totalFiles: rawEntries.length,
           totalUncompressedSize,
           fileTree: [],
+          extractedFiles: [],
+          projectFingerprint: null,
           categorized: {},
           findings: [
             {
@@ -371,6 +452,8 @@ export async function processZip({ buffer, evidenceId, fileName = "archive.zip" 
         totalFiles: rawEntries.length,
         totalUncompressedSize,
         fileTree: [],
+        extractedFiles: [],
+        projectFingerprint: null,
         categorized: {},
         findings: [
           {
@@ -384,37 +467,79 @@ export async function processZip({ buffer, evidenceId, fileName = "archive.zip" 
       };
     }
 
-    const cat = categorizeFilePath(entryName);
-    if (!entry.isDir) {
-      const fileRecord = {
-        path: entryName,
-        size: entry.uncompressedSize,
-        category: cat,
-      };
-      fileTree.push(fileRecord);
-      if (categorized[cat]) categorized[cat].push(fileRecord);
+    if (entry.isDir) continue;
 
-      // Safe Extraction of text content from manifests, docs, readme, config, tests, and source files
-      if (entry.dataBuffer && (cat === "manifests" || cat === "readme" || cat === "docs" || cat === "config" || cat === "source" || cat === "tests")) {
-        const rawStr = entry.dataBuffer.toString("utf8");
-        const textContent = rawStr.slice(0, 50000);
-        if (textContent.trim().length > 0) {
-          const fileChunks = chunkContent({
-            content: textContent,
-            evidenceId,
-            sourceType: "zip_entry",
-            sourceLocation: `${fileName}:${entryName}`,
-          });
-          chunks.push(...fileChunks);
-        }
+    // Skip ignored/build directories
+    if (isIgnoredPath(entryName)) continue;
+
+    const cat = categorizeFilePath(entryName);
+    const lang = detectLanguage(entryName);
+    const ext = path.extname(entryName).toLowerCase();
+
+    const fileRecord = {
+      path: entryName,
+      size: entry.uncompressedSize,
+      category: cat,
+      language: lang,
+      extension: ext,
+    };
+    fileTree.push(fileRecord);
+    if (categorized[cat]) categorized[cat].push(fileRecord);
+
+    // Deep Reading: Extract actual text content from code, configs, manifests, and documentation
+    if (
+      entry.dataBuffer &&
+      (cat === "manifests" ||
+        cat === "readme" ||
+        cat === "docs" ||
+        cat === "config" ||
+        cat === "source" ||
+        cat === "tests")
+    ) {
+      let rawStr = "";
+      try {
+        rawStr = entry.dataBuffer.toString("utf8");
+      } catch (_) {}
+
+      // Keep up to 100KB of text content per file for deep static inspection
+      const textContent = rawStr.slice(0, 100000);
+      const isReadable = textContent.trim().length > 0;
+
+      if (isReadable) {
+        const fileHash = calculateSha256(entry.dataBuffer);
+        extractedFiles.push({
+          path: entryName,
+          category: cat,
+          language: lang,
+          extension: ext,
+          size: entry.uncompressedSize,
+          hash: fileHash,
+          readable: true,
+          content: textContent,
+        });
+
+        // Generate chunk entries with accurate location provenance
+        const fileChunks = chunkContent({
+          content: textContent,
+          evidenceId,
+          sourceType: "zip_entry",
+          sourceLocation: `${fileName}:${entryName}`,
+        });
+        chunks.push(...fileChunks);
       }
     }
   }
 
+  // Generate Deep Project Fingerprint
+  const projectFingerprint = generateProjectFingerprint({
+    files: extractedFiles,
+    chunks,
+  });
+
   findings.push({
     type: "zip_archive_summary",
     location: `file: ${fileName}`,
-    finding: `ZIP archive verified safely (${fileTree.length} file(s), ${totalUncompressedSize} total uncompressed bytes).`,
+    finding: `ZIP archive verified safely (${fileTree.length} non-ignored file(s), ${extractedFiles.length} readable text/source file(s), ${totalUncompressedSize} total uncompressed bytes).`,
   });
 
   findings.push({
@@ -423,11 +548,17 @@ export async function processZip({ buffer, evidenceId, fileName = "archive.zip" 
     finding: `Categorized contents: ${categorized.source.length} source, ${categorized.config.length} config, ${categorized.docs.length} docs, ${categorized.manifests.length} manifests, ${categorized.tests.length} tests.`,
   });
 
-  const sampleFileList = fileTree.slice(0, 20).map((f) => f.path).join(", ");
+  findings.push({
+    type: "project_fingerprint_summary",
+    location: `file: ${fileName}`,
+    finding: `Detected Application: "${projectFingerprint.primaryDomain.name}" (Confidence: ${projectFingerprint.primaryDomain.confidence}%). Technologies: [${projectFingerprint.technologies.join(", ")}]. Auth: ${projectFingerprint.hasAuthentication ? "Detected" : "None"}. Tests: ${projectFingerprint.hasTests ? "Detected" : "None"}.`,
+  });
+
+  const sampleFileList = fileTree.slice(0, 25).map((f) => f.path).join(", ");
   findings.push({
     type: "zip_file_list",
     location: `file: ${fileName}`,
-    finding: `Files extracted from ZIP: [${sampleFileList}${fileTree.length > 20 ? "..." : ""}]`,
+    finding: `Files extracted from ZIP: [${sampleFileList}${fileTree.length > 25 ? "..." : ""}]`,
   });
 
   // Clean up sandbox folder safely
@@ -443,8 +574,11 @@ export async function processZip({ buffer, evidenceId, fileName = "archive.zip" 
     totalFiles: fileTree.length,
     totalUncompressedSize,
     fileTree,
+    extractedFiles,
+    projectFingerprint,
     categorized,
     findings,
     chunks,
   };
 }
+

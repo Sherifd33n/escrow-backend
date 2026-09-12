@@ -119,12 +119,20 @@ export function calculateFinalVerdict({
     }
   });
 
+  // Check if any deterministic check flagged a Project Identity Mismatch
+  const hasProjectMismatch = Object.values(deterministicChecks).some((dc) => dc && dc.projectMismatch);
+  if (hasProjectMismatch) {
+    releaseBlockers.unshift("Major project identity mismatch: Submitted deliverables do not correspond to the contracted project scope.");
+  }
+
   // Calculate weighted overall score
   let rawScore = Math.round(totalScoreSum / Math.max(1, auditedCount));
 
-  // Critical Failure Guard: Only HARD failures on critical/required items cap the score at 40
-  // NOTE: revision_required on required (non-critical) items does NOT cap the score.
-  if (criticalFailureCount > 0) {
+  // Project Mismatch Guard: Caps score to max 20
+  if (hasProjectMismatch) {
+    rawScore = Math.min(20, rawScore);
+  } else if (criticalFailureCount > 0) {
+    // Critical Failure Guard: Only HARD failures on critical/required items cap the score at 40
     rawScore = Math.min(40, rawScore);
   }
 
@@ -133,17 +141,15 @@ export function calculateFinalVerdict({
 
   // Calculate Risk Level
   let risk = "low";
-  if (criticalFailureCount > 0 || failedCount >= 2 || riskScore >= 70) {
+  if (hasProjectMismatch || criticalFailureCount > 0 || failedCount >= 2 || riskScore >= 70) {
     risk = "high";
   } else if (criticalInsufficientCount > 0 || failedCount === 1 || requiredRevisionCount > 0 || riskScore >= 40) {
     risk = "medium";
   }
 
   // Calculate Verdict Status
-  // Only truly hard critical failures → "failed"
-  // Required revisions on non-critical items → "revision_required" (not failed)
   let status = "passed";
-  if (criticalFailureCount > 0 || failedCount >= 2) {
+  if (hasProjectMismatch || criticalFailureCount > 0 || failedCount >= 2) {
     status = "failed";
   } else if (revisionCount > 0 || requiredRevisionCount > 0 || failedCount === 1 || score < 65) {
     status = "revision_required";
@@ -157,10 +163,10 @@ export function calculateFinalVerdict({
   let releaseEligible = false;
   let releaseDecision = "blocked";
 
-  if (status === "passed") {
+  if (!hasProjectMismatch && status === "passed") {
     releaseEligible = true;
     releaseDecision = "eligible";
-  } else if (status === "passed_with_notes" && criticalFailureCount === 0 && criticalInsufficientCount === 0) {
+  } else if (!hasProjectMismatch && status === "passed_with_notes" && criticalFailureCount === 0 && criticalInsufficientCount === 0) {
     releaseEligible = true;
     releaseDecision = "eligible";
   } else if (status === "manual_review_required") {
@@ -181,9 +187,11 @@ export function calculateFinalVerdict({
   const recommendation =
     releaseEligible
       ? "Deliverables meet contractual requirements. Escrow funds may be released."
-      : releaseBlockers.length > 0
-        ? `Provider should address blockers: ${releaseBlockers.slice(0, 2).join("; ")}.`
-        : "Manual review required by client/admin before releasing funds.";
+      : hasProjectMismatch
+        ? "Provider must submit the actual contracted project deliverables. Escrow release is blocked."
+        : releaseBlockers.length > 0
+          ? `Provider should address blockers: ${releaseBlockers.slice(0, 2).join("; ")}.`
+          : "Manual review required by client/admin before releasing funds.";
 
   return {
     score,
@@ -202,3 +210,4 @@ export function calculateFinalVerdict({
     recommendation,
   };
 }
+

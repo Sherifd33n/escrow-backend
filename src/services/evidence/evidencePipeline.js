@@ -25,6 +25,7 @@ import {
   getEvidenceForSubmission,
   getEvidenceFindingsForSubmission,
   getEvidenceChunksForSubmission,
+  getProcessingResultsForSubmission,
 } from "./evidenceStore.js";
 
 import { processPdf } from "./processors/pdfProcessor.js";
@@ -551,6 +552,26 @@ export async function analyzeSubmissionEvidence({ transactionId, milestoneId, su
   const items = targetSubId ? await getEvidenceForSubmission(targetSubId) : [];
   const findings = targetSubId ? await getEvidenceFindingsForSubmission(targetSubId) : [];
   const chunks = targetSubId ? await getEvidenceChunksForSubmission(targetSubId) : [];
+  const procResults = targetSubId ? await getProcessingResultsForSubmission(targetSubId) : [];
+
+  const extractedFiles = [];
+  let projectFingerprint = null;
+
+  for (const pr of procResults) {
+    const resData = typeof pr.result_json === "string" ? JSON.parse(pr.result_json) : pr.result_json;
+    if (resData?.extractedFiles && Array.isArray(resData.extractedFiles)) {
+      extractedFiles.push(...resData.extractedFiles);
+    }
+    if (resData?.projectFingerprint && !projectFingerprint) {
+      projectFingerprint = resData.projectFingerprint;
+    }
+  }
+
+  // Fallback: If projectFingerprint is missing, generate it dynamically from files and chunks
+  if (!projectFingerprint) {
+    const { generateProjectFingerprint } = await import("./projectFingerprinter.js");
+    projectFingerprint = generateProjectFingerprint({ files: extractedFiles, chunks });
+  }
 
   const summary = {
     total: items.length,
@@ -577,7 +598,10 @@ export async function analyzeSubmissionEvidence({ transactionId, milestoneId, su
     processedEvidence: items,
     findings,
     chunks,
+    extractedFiles,
+    projectFingerprint,
     limitations,
     processingSummary: summary,
   };
 }
+

@@ -112,12 +112,14 @@ export async function saveFindings(
   if (!findings || findings.length === 0) return;
   const q = conn || db;
 
-  for (const f of findings) {
-    await q.query(
-      `INSERT INTO evidence_findings
-         (evidence_item_id, transaction_id, submission_id, scope_item_id, criterion_id, finding_type, location, finding_text, metadata_json)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
+  // Batch insert up to 50 findings per query for speed
+  const batchSize = 50;
+  for (let i = 0; i < findings.length; i += batchSize) {
+    const batch = findings.slice(i, i + batchSize);
+    const placeholders = batch.map(() => "(?, ?, ?, ?, ?, ?, ?, ?, ?)").join(", ");
+    const params = [];
+    for (const f of batch) {
+      params.push(
         evidencePk,
         transactionId,
         submissionId || null,
@@ -127,7 +129,13 @@ export async function saveFindings(
         f.location || null,
         f.finding || f.text || "",
         f.metadata ? JSON.stringify(f.metadata) : null,
-      ],
+      );
+    }
+    await q.query(
+      `INSERT INTO evidence_findings
+         (evidence_item_id, transaction_id, submission_id, scope_item_id, criterion_id, finding_type, location, finding_text, metadata_json)
+       VALUES ${placeholders}`,
+      params,
     );
   }
 }
@@ -144,13 +152,14 @@ export async function saveChunks(evidencePk, transactionId, chunks, conn) {
   if (!chunks || chunks.length === 0) return;
   const q = conn || db;
 
-  for (const c of chunks) {
-    await q.query(
-      `INSERT INTO evidence_chunks
-         (chunk_id, evidence_item_id, transaction_id, source_type, source_location, chunk_index, content, metadata_json)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-       ON DUPLICATE KEY UPDATE content = VALUES(content)`,
-      [
+  // Batch insert up to 50 chunks per query for speed
+  const batchSize = 50;
+  for (let i = 0; i < chunks.length; i += batchSize) {
+    const batch = chunks.slice(i, i + batchSize);
+    const placeholders = batch.map(() => "(?, ?, ?, ?, ?, ?, ?, ?)").join(", ");
+    const params = [];
+    for (const c of batch) {
+      params.push(
         c.chunk_id,
         evidencePk,
         transactionId,
@@ -159,7 +168,14 @@ export async function saveChunks(evidencePk, transactionId, chunks, conn) {
         c.chunk_index || 0,
         c.content,
         c.metadata ? JSON.stringify(c.metadata) : null,
-      ],
+      );
+    }
+    await q.query(
+      `INSERT INTO evidence_chunks
+         (chunk_id, evidence_item_id, transaction_id, source_type, source_location, chunk_index, content, metadata_json)
+       VALUES ${placeholders}
+       ON DUPLICATE KEY UPDATE content = VALUES(content)`,
+      params,
     );
   }
 }
@@ -189,27 +205,64 @@ export async function getEvidenceFindingsForSubmission(submissionId) {
     `SELECT ef.*, ei.evidence_id, ei.evidence_type, ei.file_name, ei.sha256_hash
      FROM evidence_findings ef
      JOIN evidence_items ei ON ef.evidence_item_id = ei.id
-     WHERE ef.submission_id = ?
-     ORDER BY ef.id ASC`,
+     WHERE ef.submission_id = ?`,
     [submissionId],
   );
-  return Array.isArray(rows) ? rows : [];
+  if (!Array.isArray(rows)) return [];
+  return rows.sort((a, b) => (a.id || 0) - (b.id || 0));
 }
 
 /**
- * Retrieves all content chunks for a given submission.
+ * Retrieves all processing results for a given submission.
+ *
+ * @param {number} submissionId
+ * @returns {Promise<Array<object>>}
+ */
+export async function getProcessingResultsForSubmission(submissionId) {
+  const rows = await db.query(
+    `SELECT epr.*, ei.evidence_id, ei.evidence_type, ei.file_name
+     FROM evidence_processing_results epr
+     JOIN evidence_items ei ON epr.evidence_item_id = ei.id
+     WHERE ei.submission_id = ?`,
+    [submissionId],
+  );
+  if (!Array.isArray(rows)) return [];
+  return rows.sort((a, b) => (b.id || 0) - (a.id || 0));
+}
+
+/**
+ * Retrieves all evidence chunks for a given submission.
  *
  * @param {number} submissionId
  * @returns {Promise<Array<object>>}
  */
 export async function getEvidenceChunksForSubmission(submissionId) {
   const rows = await db.query(
-    `SELECT ec.*, ei.evidence_id, ei.evidence_type
+    `SELECT ec.*, ei.evidence_id, ei.evidence_type, ei.file_name
      FROM evidence_chunks ec
      JOIN evidence_items ei ON ec.evidence_item_id = ei.id
-     WHERE ei.submission_id = ?
-     ORDER BY ec.id ASC`,
+     WHERE ei.submission_id = ?`,
     [submissionId],
   );
-  return Array.isArray(rows) ? rows : [];
+  if (!Array.isArray(rows)) return [];
+  return rows.sort((a, b) => (a.id || 0) - (b.id || 0));
 }
+
+/**
+ * Retrieves all processing results for a given transaction.
+ *
+ * @param {number} transactionId
+ * @returns {Promise<Array<object>>}
+ */
+export async function getProcessingResultsForTransaction(transactionId) {
+  const rows = await db.query(
+    `SELECT epr.*, ei.evidence_id, ei.evidence_type, ei.file_name
+     FROM evidence_processing_results epr
+     JOIN evidence_items ei ON epr.evidence_item_id = ei.id
+     WHERE ei.transaction_id = ?`,
+    [transactionId],
+  );
+  if (!Array.isArray(rows)) return [];
+  return rows.sort((a, b) => (b.id || 0) - (a.id || 0));
+}
+

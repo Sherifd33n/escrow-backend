@@ -6,8 +6,8 @@ import dns from "dns";
 import dotenv from "dotenv";
 
 dotenv.config();
-
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+dotenv.config({ path: path.resolve(__dirname, "../../.env") });
 
 const dbConfig = {
   host: process.env.DB_HOST || "localhost",
@@ -17,6 +17,7 @@ const dbConfig = {
   multipleStatements: true,
   enableKeepAlive: true,
   keepAliveInitialDelay: 10000,
+  connectTimeout: 30000,
 };
 
 let pool;
@@ -26,7 +27,7 @@ async function resolveHost(host) {
     return host;
   }
   try {
-    const res = await dns.promises.lookup(host);
+    const res = await dns.promises.lookup(host, { family: 4 });
     return res.address;
   } catch (err) {
     console.warn(`System DNS lookup failed for ${host} (${err.code || err.message}). Trying public DNS fallback (8.8.8.8, 1.1.1.1)...`);
@@ -97,15 +98,15 @@ export async function initDatabase() {
     const schemaPath = path.join(__dirname, "schema.sql");
     if (fs.existsSync(schemaPath)) {
       const schemaSql = fs.readFileSync(schemaPath, "utf8");
-      const conn = await pool.getConnection();
       try {
-        await conn.query(schemaSql);
+        await query(schemaSql);
         console.log("Database schema successfully verified/initialized.");
 
         // Run migration to add columns if they are missing
-        await runMigrations(conn);
-      } finally {
-        conn.release();
+        await runMigrations();
+      } catch (schemaErr) {
+        console.warn("Schema initialization warning:", schemaErr.message);
+        await runMigrations();
       }
     } else {
       console.warn("schema.sql not found, skipping table initialization.");
@@ -116,7 +117,7 @@ export async function initDatabase() {
   }
 }
 
-async function runMigrations(conn) {
+async function runMigrations(conn = { query: async (s, p) => [await query(s, p)] }) {
   // Check and rename old columns if they exist
   try {
     const [discoveryCols] = await conn.query(
@@ -1121,8 +1122,31 @@ export async function query(sql, params) {
     throw new Error("Database pool not initialized. Call initDatabase first.");
   }
 
-  const [results] = await pool.query(sql, params);
-  return results;
+  const RETRYABLE_CODES = new Set([
+    "ECONNRESET",
+    "ETIMEDOUT",
+    "PROTOCOL_CONNECTION_LOST",
+    "EPIPE",
+    "ER_CON_COUNT_ERROR",
+    "ER_SERVER_SHUTDOWN",
+  ]);
+
+  let lastError;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const [results] = await pool.query(sql, params);
+      return results;
+    } catch (err) {
+      lastError = err;
+      if (RETRYABLE_CODES.has(err.code) && attempt < 3) {
+        console.warn(`[DB] Query failed with ${err.code}, retrying (${attempt}/3)...`);
+        await new Promise((r) => setTimeout(r, 1000 * attempt));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastError;
 }
 
 export default {

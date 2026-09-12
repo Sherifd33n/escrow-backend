@@ -1,22 +1,17 @@
-/**
- * disputeAnalysisService.js
- * AI-Assisted Dispute Resolution Engine for Escrow Platform Admin Panel.
- *
- * Gathers complete transaction & dispute context (contract scope, deliverables,
- * Stage 3/4 AI audits, transaction history, user evidence) and runs structured
- * evaluation via Groq to recommend fair financial resolutions.
- */
-
 import OpenAI from "openai";
 import db from "../config/db.js";
 import { logTransactionEvent } from "./transactionEventService.js";
+import { compareProjectIdentity, generateProjectFingerprint } from "./evidence/projectFingerprinter.js";
+import { getProcessingResultsForTransaction } from "./evidence/evidenceStore.js";
 
 const groq = new OpenAI({
   apiKey: process.env.GROQ_API_KEY || "dummy_groq_key",
   baseURL: "https://api.groq.com/openai/v1",
+  timeout: 15000,
+  maxRetries: 0,
 });
 
-const GROQ_MODEL = process.env.GROQ_MODEL || "llama-3.3-70b-versatile";
+const GROQ_MODEL = process.env.GROQ_MODEL || "openai/gpt-oss-120b";
 
 /**
  * Safely parse JSON from AI response text.
@@ -39,12 +34,12 @@ function parseJsonResponse(text) {
 }
 
 /**
- * Collect all relevant context for a dispute.
+ * Collect all relevant context for a dispute including deep project evidence.
  */
 export async function collectDisputeContext(disputeId) {
   const [disputeRows] = await db.getPool().query(
     "SELECT * FROM disputes WHERE id = ?",
-    [disputeId]
+    [disputeId],
   );
   if (!disputeRows.length) {
     throw new Error(`Dispute #${disputeId} not found.`);
@@ -61,24 +56,24 @@ export async function collectDisputeContext(disputeId) {
      LEFT JOIN users b ON t.buyer_id = b.id
      LEFT JOIN users s ON t.seller_id = s.id
      WHERE t.id = ?`,
-    [txId]
+    [txId],
   );
   const transaction = txRows[0] || null;
 
   // Scope items & Acceptance criteria
   const [scopeRows] = await db.getPool().query(
     "SELECT * FROM transaction_scope_items WHERE transaction_id = ? ORDER BY id ASC",
-    [txId]
+    [txId],
   );
   const [criteriaRows] = await db.getPool().query(
     "SELECT * FROM acceptance_criteria WHERE transaction_id = ? ORDER BY id ASC",
-    [txId]
+    [txId],
   );
 
   // Milestones & Submissions
   const [milestoneRows] = await db.getPool().query(
     "SELECT * FROM milestones WHERE transaction_id = ? ORDER BY id ASC",
-    [txId]
+    [txId],
   );
   const [submissionRows] = await db.getPool().query(
     `SELECT ms.*, m.title AS milestone_title
@@ -86,13 +81,13 @@ export async function collectDisputeContext(disputeId) {
      JOIN milestones m ON ms.milestone_id = m.id
      WHERE m.transaction_id = ?
      ORDER BY ms.created_at DESC`,
-    [txId]
+    [txId],
   );
 
   // AI Audits and Analyzer Results
   const [auditRows] = await db.getPool().query(
     "SELECT * FROM ai_audits WHERE transaction_id = ? ORDER BY created_at DESC LIMIT 5",
-    [txId]
+    [txId],
   );
 
   let analyzerRows = [];
@@ -103,15 +98,50 @@ export async function collectDisputeContext(disputeId) {
        JOIN audit_jobs aj ON ar.audit_job_id = aj.id
        WHERE aj.transaction_id = ?
        ORDER BY ar.created_at DESC LIMIT 10`,
-      [txId]
+      [txId],
     );
     analyzerRows = aRes || [];
   }
 
+  // Load deep evidence findings and processing results
+  const [findingsRows] = await db.getPool().query(
+    "SELECT * FROM evidence_findings WHERE transaction_id = ? ORDER BY id ASC LIMIT 50",
+    [txId],
+  );
+  const [chunksRows] = await db.getPool().query(
+    "SELECT * FROM evidence_chunks WHERE transaction_id = ? ORDER BY id ASC LIMIT 30",
+    [txId],
+  );
+
+  const procResults = await getProcessingResultsForTransaction(txId);
+  let extractedFiles = [];
+  let projectFingerprint = null;
+
+  for (const pr of procResults) {
+    const resData = typeof pr.result_json === "string" ? JSON.parse(pr.result_json) : pr.result_json;
+    if (resData?.extractedFiles && Array.isArray(resData.extractedFiles)) {
+      extractedFiles.push(...resData.extractedFiles);
+    }
+    if (resData?.projectFingerprint && !projectFingerprint) {
+      projectFingerprint = resData.projectFingerprint;
+    }
+  }
+
+  if (!projectFingerprint) {
+    projectFingerprint = generateProjectFingerprint({ files: extractedFiles, chunks: chunksRows });
+  }
+
+  const contractScopeStr = `${transaction?.title || ""} ${transaction?.category || ""} ${scopeRows.map(s => s.name || s.title).join(" ")} ${criteriaRows.map(c => c.description || c.text).join(" ")}`;
+  const identityComparison = compareProjectIdentity({
+    expectedScope: contractScopeStr,
+    requirements: criteriaRows.map(c => ({ requirement: c.description || c.text, scope_name: c.scope_name })),
+    detectedFingerprint: projectFingerprint,
+  });
+
   // Transaction events
   const [eventRows] = await db.getPool().query(
     "SELECT * FROM transaction_events WHERE transaction_id = ? ORDER BY created_at ASC",
-    [txId]
+    [txId],
   );
 
   return {
@@ -124,81 +154,99 @@ export async function collectDisputeContext(disputeId) {
     audits: auditRows || [],
     analyzerResults: analyzerRows || [],
     events: eventRows || [],
+    evidenceFindings: findingsRows || [],
+    extractedFilesCount: extractedFiles.length,
+    projectFingerprint,
+    identityComparison,
   };
 }
 
 /**
- * Fallback deterministic analysis if AI fails or key is missing.
+ * Deterministic fallback analysis if AI fails or key is missing.
+ * Corrects erroneous previous audits if project mismatch is detected.
  */
 function generateFallbackAnalysis(context) {
-  const { dispute, transaction, milestones, submissions, audits } = context;
+  const { dispute, transaction, milestones, submissions, audits, identityComparison, projectFingerprint } = context;
   const escrowBal = parseFloat(transaction?.escrow_balance || transaction?.amount || 0);
   const isBuyerFiler = Number(dispute.filed_by) === Number(transaction?.buyer_id);
   const filerRole = isBuyerFiler ? "Buyer" : "Seller";
 
-  // Check if any audits failed or passed
   const latestAudit = audits[0];
   let recommendation = "split";
   let buyerPct = 50;
   let sellerPct = 50;
-  let confidence = 70;
+  let confidence = 75;
+  const findings = [];
 
-  if (latestAudit && latestAudit.score >= 80) {
-    recommendation = "seller";
-    buyerPct = 0;
-    sellerPct = 100;
-    confidence = 82;
-  } else if (latestAudit && latestAudit.score < 40) {
+  // Case 1: Project Identity Mismatch (e.g. Wrong ZIP or unrelated project submitted)
+  if (identityComparison && identityComparison.projectMismatch) {
     recommendation = "buyer";
     buyerPct = 100;
     sellerPct = 0;
+    confidence = 96;
+    findings.push({
+      title: "Project Identity Mismatch Detected",
+      severity: "high",
+      description: `Submitted archive corresponds to "${identityComparison.detectedDomain}" rather than contracted "${identityComparison.expectedDomain}". ${identityComparison.reasons.join(" ")}`,
+      impact: "Deliverables do not fulfill contract scope; justifies 100% refund to Buyer.",
+    });
+  } else if (latestAudit && latestAudit.score >= 80) {
+    recommendation = "seller";
+    buyerPct = 0;
+    sellerPct = 100;
     confidence = 85;
+  } else if (latestAudit && (latestAudit.score < 40 || latestAudit.status === "failed")) {
+    recommendation = "buyer";
+    buyerPct = 100;
+    sellerPct = 0;
+    confidence = 88;
   } else if (submissions.length === 0 && isBuyerFiler) {
     recommendation = "buyer";
     buyerPct = 100;
     sellerPct = 0;
-    confidence = 90;
+    confidence = 92;
   }
 
   const buyerAmount = Number(((escrowBal * buyerPct) / 100).toFixed(2));
   const sellerAmount = Number(((escrowBal * sellerPct) / 100).toFixed(2));
 
+  findings.push({
+    title: "Dispute Claim Evaluation",
+    severity: "medium",
+    description: dispute.reason || "Dispute claim raised without specific details.",
+    impact: `Contests $${escrowBal.toLocaleString()} in escrow.`,
+  });
+
   return {
     recommendation,
     confidence_score: confidence,
-    summary: `Dispute filed by ${filerRole} regarding: "${dispute.reason}". Analysis based on ${milestones.length} milestone(s), ${submissions.length} deliverable submission(s), and ${audits.length} automated audit record(s).`,
+    summary: `Dispute filed by ${filerRole} regarding: "${dispute.reason}". Deep evidence audit inspected ${submissions.length} submission(s) and project fingerprint ("${projectFingerprint?.primaryDomain?.name || "Unknown"}"). Resolution recommendation: favor ${recommendation.toUpperCase()}.`,
     contract_analysis: {
-      scope_compliance: latestAudit ? `Audit score: ${latestAudit.score}/100.` : "Scope compliance undetermined.",
+      scope_compliance: identityComparison?.projectMismatch
+        ? `Scope non-compliant: expected "${identityComparison.expectedDomain}" but received "${identityComparison.detectedDomain}".`
+        : latestAudit
+          ? `Audit score: ${latestAudit.score}/100.`
+          : "Scope compliance undetermined.",
       milestone_deliverables_status: `${submissions.length} deliverable(s) submitted across ${milestones.length} milestone(s).`,
-      acceptance_criteria_met: latestAudit?.status === "passed" ? "Criteria largely satisfied" : "Discrepancies identified in acceptance criteria",
-      notes: "Contract obligations assessed against available milestone deliverables and audit benchmarks.",
+      acceptance_criteria_met: identityComparison?.projectMismatch ? "Acceptance criteria unfulfilled (wrong project)" : latestAudit?.status === "passed" ? "Criteria largely satisfied" : "Discrepancies identified in acceptance criteria",
+      notes: "Contract obligations assessed against deep code inspection and project fingerprint.",
     },
     evidence_evaluation: {
-      filer_evidence_strength: dispute.evidence ? "moderate" : "weak",
-      counterparty_position: isBuyerFiler ? "Seller has submitted work under contract milestones." : "Buyer raised contestation on deliverables.",
+      filer_evidence_strength: dispute.evidence || identityComparison?.projectMismatch ? "strong" : "moderate",
+      counterparty_position: isBuyerFiler ? "Seller submitted archive under contract milestones." : "Buyer raised contestation on deliverables.",
       key_evidence_points: [
         `Filer statement: ${dispute.reason}`,
-        dispute.evidence ? "Supporting evidence provided by filer." : "No separate evidence attachments submitted with dispute.",
+        `Detected project type: "${projectFingerprint?.primaryDomain?.name || "Generic"}"`,
+        identityComparison?.projectMismatch ? "Archive does not correspond to contractual deliverables." : "Archive structure inspected.",
       ],
     },
-    findings: [
-      {
-        title: "Dispute Claim Evaluation",
-        severity: "medium",
-        description: dispute.reason || "Dispute claim raised without specific details.",
-        impact: `Contests $${escrowBal.toLocaleString()} in escrow.`,
-      },
-      {
-        title: "Deliverables Status",
-        severity: submissions.length > 0 ? "low" : "high",
-        description: submissions.length > 0 ? `${submissions.length} submission(s) logged on platform.` : "No milestone submissions found.",
-        impact: submissions.length > 0 ? "Verification data available." : "Lack of submitted proof.",
-      },
-    ],
+    findings,
     fault_attribution: {
       buyer_fault_percentage: 100 - buyerPct,
       seller_fault_percentage: 100 - sellerPct,
-      notes: `Evaluation assigns primary responsibility based on deliverable audit score and submission completeness.`,
+      notes: identityComparison?.projectMismatch
+        ? "100% seller fault due to submitting deliverables that do not correspond to the escrow agreement."
+        : "Evaluation assigns responsibility based on deliverable audit score and submission completeness.",
     },
     recommended_split: {
       buyer_percentage: buyerPct,
@@ -206,14 +254,17 @@ function generateFallbackAnalysis(context) {
       buyer_amount: buyerAmount,
       seller_amount: sellerAmount,
     },
-    reasoning: `Based on automated audit scores and contractual submission state, the platform recommends a resolution favoring ${recommendation.toUpperCase()} (${buyerPct}% Buyer / ${sellerPct}% Seller) for the $${escrowBal.toLocaleString()} in dispute.`,
+    reasoning: identityComparison?.projectMismatch
+      ? `Deep static inspection reveals the submitted archive contains a ${identityComparison.detectedDomain} rather than the contracted ${identityComparison.expectedDomain}. Previous audit conclusions are corrected, and full refund of $${escrowBal.toLocaleString()} to Buyer is recommended.`
+      : `Based on automated audit scores and contractual submission state, the platform recommends a resolution favoring ${recommendation.toUpperCase()} (${buyerPct}% Buyer / ${sellerPct}% Seller) for the $${escrowBal.toLocaleString()} in dispute.`,
     risk_factors: [
-      "Officer should verify any direct communication logs between parties.",
-      "Check if any custom milestone adjustments were agreed off-platform.",
+      "Officer should review provider and client dispute chat history.",
+      "Check if custom out-of-band amendments were made outside platform scope.",
     ],
-    suggested_action: `Review the technical deliverables and execute resolution favoring ${recommendation.toUpperCase()}.`,
+    suggested_action: `Execute dispute resolution favoring ${recommendation.toUpperCase()} based on deep evidence verification.`,
   };
 }
+
 
 /**
  * Execute AI Dispute Analysis using Groq LLM.
@@ -282,6 +333,8 @@ Required JSON structure:
   "suggested_action": "<actionable directive for the admin officer>"
 }`;
 
+  const { projectFingerprint, identityComparison, evidenceFindings } = context;
+
   const userPrompt = `DISPUTE CASE CONTEXT:
 Transaction Code: ${transaction?.txn_code}
 Title: ${transaction?.title}
@@ -308,14 +361,36 @@ ${milestones.length ? JSON.stringify(milestones.map(m => ({ id: m.id, title: m.t
 Deliverable Submissions:
 ${submissions.length ? JSON.stringify(submissions.map(s => ({ milestone_id: s.milestone_id, version: s.version, category: s.category, notes: s.notes, data: s.submission_data }))) : "No submissions logged."}
 
-Technical AI Audits:
+Deep Project Fingerprint (Static Code Analysis):
+${projectFingerprint ? JSON.stringify({
+  detected_application: projectFingerprint.primaryDomain.name,
+  confidence: projectFingerprint.primaryDomain.confidence,
+  technologies: projectFingerprint.technologies,
+  routes_sample: (projectFingerprint.routes || []).slice(0, 10),
+  has_auth: projectFingerprint.hasAuthentication,
+  has_tests: projectFingerprint.hasTests,
+  source_files_count: projectFingerprint.sourceFilesCount,
+}) : "No code fingerprint available"}
+
+Project Identity Mismatch Check:
+${identityComparison ? JSON.stringify(identityComparison) : "No comparison performed"}
+
+Technical AI Audits (Previous Platform Audits):
 ${audits.length ? JSON.stringify(audits.map(a => ({ score: a.score, status: a.status, risk: a.risk, summary: a.summary, recommendation: a.recommendation }))) : "No audits recorded."}
+
+Key Evidence Findings:
+${evidenceFindings.slice(0, 15).map(f => `[${f.finding_type}] ${f.finding_text}`).join("\n") || "No explicit findings recorded."}
 
 Specialized Analyzer Results:
 ${analyzerResults.length ? JSON.stringify(analyzerResults.map(ar => ({ analyzer: ar.analyzer_name, status: ar.status, findings: ar.findings_json }))) : "No specialized analyzer results."}
 
 Recent Timeline Events:
 ${events.slice(-10).map(e => `[${e.created_at}] ${e.action}: ${e.note || ""}`).join("\n")}
+
+## CRITICAL ARBITRATION INSTRUCTION:
+- If the project identity check indicates a mismatch (e.g. provider submitted a calculator for an e-commerce contract), the previous audit results are deemed inaccurate.
+- You must attribute 100% fault to the seller for submitting non-compliant deliverables and recommend 100% refund ($${escrowBal.toLocaleString()}) to the Buyer.
+- Citing specific inspectable code evidence is mandatory.
 
 Please provide your rigorous, impartial AI Dispute Resolution Analysis in valid JSON.`;
 
@@ -364,6 +439,7 @@ Please provide your rigorous, impartial AI Dispute Resolution Analysis in valid 
     };
   }
 }
+
 
 /**
  * Run full dispute analysis, record in DB, and return saved record.

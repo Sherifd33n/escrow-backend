@@ -12,9 +12,11 @@ import OpenAI from "openai";
 const groq = new OpenAI({
   apiKey: process.env.GROQ_API_KEY || "dummy_groq_key",
   baseURL: "https://api.groq.com/openai/v1",
+  timeout: 15000,
+  maxRetries: 0,
 });
 
-const GROQ_MODEL = process.env.GROQ_API_KEY ? (process.env.GROQ_MODEL || "groq/compound-mini") : "dummy";
+const GROQ_MODEL = process.env.GROQ_API_KEY ? (process.env.GROQ_MODEL || "openai/gpt-oss-120b") : "dummy";
 
 const VALID_REQUIREMENT_STATUSES = Object.freeze([
   "passed",
@@ -24,6 +26,8 @@ const VALID_REQUIREMENT_STATUSES = Object.freeze([
   "insufficient_evidence",
   "not_applicable",
 ]);
+
+import { matchRequirementsToEvidence } from "../evidence/requirementMatcher.js";
 
 /**
  * Validates a single requirement audit result object against the strict Stage 3 schema.
@@ -42,60 +46,62 @@ export function validateRequirementResult(res) {
 }
 
 /**
- * Smart deterministic fallback audit used when no Groq API key is configured.
+ * Deterministic fallback audit used when no Groq API key is configured or AI service is unavailable.
+ * Strictly adheres to evidence presence and project identity rules.
  *
- * Uses the pre-computed deterministicChecks facts per requirement to assign
- * a meaningful status and score — giving fair partial credit for submitted evidence.
- *
- * Scoring tiers:
- *   evidenceProcessed + submissionExists + urlReachable → passed_with_notes (score: 78)
- *   evidenceProcessed + submissionExists                → passed_with_notes (score: 72)
- *   evidenceExists + submissionExists (not processed)   → revision_required (score: 52)
- *   submissionExists only (no evidence)                 → revision_required (score: 38)
- *   nothing submitted, contradiction detected           → revision_required (score: 28)
- *   nothing at all                                      → insufficient_evidence (score: 18)
+ * NEVER produces an automatic passing verdict without concrete matching code evidence.
  */
 export function deterministicFallbackAudit(requirements, deterministicChecks = {}) {
   return requirements.map((req) => {
     const checks = deterministicChecks[req.criterion_id] || {};
     const facts = checks.facts || [];
 
-    const submissionExists   = !!checks.submissionExists;
-    const evidenceExists     = !!checks.evidenceExists;
-    const evidenceProcessed  = !!checks.evidenceProcessed;
-    const urlReachable       = !!checks.urlReachable;
+    const submissionExists = !!checks.submissionExists;
+    const evidenceProcessed = !!checks.evidenceProcessed;
+    const codeEvidenceFound = !!checks.codeEvidenceFound;
+    const projectMismatch = !!checks.projectMismatch;
     const contradictionDetected = !!checks.contradictionDetected;
+    const urlReachable = !!checks.urlReachable;
 
-    let status, score, reason, verified = [], notVerified = [];
+    let status = "insufficient_evidence";
+    let score = 20;
+    let reason = "";
+    const verified = [];
+    const notVerified = [];
+    const evidenceUsed = [];
 
-    if (contradictionDetected) {
-      status = "revision_required";
-      score  = 28;
-      reason = `Contradiction detected between provider claim and submitted evidence findings. ${facts.find(f => f.includes("CONTRADICTION")) || ""}`;
+    if (projectMismatch) {
+      status = "failed";
+      score = 15;
+      reason = `Project Identity Mismatch: Submitted archive does not correspond to the contracted project requirements. ${checks.projectMismatchDetails || ""}`.trim();
       notVerified.push(req.requirement);
+    } else if (contradictionDetected) {
+      status = "revision_required";
+      score = 25;
+      reason = `Contradiction detected: ${facts.find((f) => f.includes("CONTRADICTION")) || "Provider claim contradicts submitted code evidence."}`;
+      notVerified.push(req.requirement);
+    } else if (codeEvidenceFound && evidenceProcessed && submissionExists) {
+      status = "passed";
+      score = urlReachable ? 92 : 86;
+      reason = `Verified: Substantial source code implementation matching "${req.requirement}" was confirmed in submitted files.`;
+      verified.push(`Code implementation verified (${checks.matchedFilesCount || 1} relevant file(s))`);
+      if (urlReachable) verified.push("Staging environment reachable");
+      evidenceUsed.push("submitted_source_code");
     } else if (evidenceProcessed && submissionExists) {
-      status = "passed_with_notes";
-      score  = urlReachable ? 78 : 72;
-      reason = `Provider submitted deliverable and evidence was successfully verified.${urlReachable ? " Staging site confirmed reachable." : ""}`;
-      verified.push("Submission received", "Evidence verified");
-      if (urlReachable) verified.push("Staging site reachable");
-      notVerified.push("Manual inspection recommended");
-    } else if (evidenceExists && submissionExists) {
-      status = "revision_required";
-      score  = 52;
-      reason = `Provider submitted a deliverable and evidence was found, but additional verification details are required.`;
-      verified.push("Submission received", "Evidence attached");
-      notVerified.push("Evidence inspection incomplete");
+      status = "insufficient_evidence";
+      score = 35;
+      reason = `Archive was processed, but no source code components, routes, or symbols matching "${req.requirement}" were identified.`;
+      notVerified.push(req.requirement);
+      evidenceUsed.push("processed_archive");
     } else if (submissionExists) {
-      status = "revision_required";
-      score  = 38;
-      reason = `Provider submitted a deliverable for this requirement but did not attach supporting evidence files or URLs. Evidence is required for audit verification.`;
-      verified.push("Submission received");
-      notVerified.push("Supporting evidence (files/URLs) missing");
+      status = "insufficient_evidence";
+      score = 25;
+      reason = `Provider submitted a deliverable description for "${req.requirement}" but did not provide inspectable source code evidence.`;
+      notVerified.push(req.requirement);
     } else {
       status = "insufficient_evidence";
-      score  = 18;
-      reason = `No provider submission or evidence found for this requirement. The provider must submit deliverables and attach supporting evidence.`;
+      score = 15;
+      reason = `No provider submission or supporting code evidence was found for "${req.requirement}".`;
       notVerified.push(req.requirement);
     }
 
@@ -108,9 +114,9 @@ export function deterministicFallbackAudit(requirements, deterministicChecks = {
       score,
       verified,
       notVerified,
-      evidenceUsed: [],
+      evidenceUsed,
       reason,
-      limitations: ["Automated evidence verification applied."],
+      limitations: ["Deterministic static verification applied."],
     };
   });
 }
@@ -143,11 +149,11 @@ export function ensureCompleteCoverage(requirements, auditedResults = []) {
       requirement: req.requirement,
       status: "insufficient_evidence",
       confidence: 70,
-      score: 50,
+      score: 30,
       verified: [],
       notVerified: [req.requirement],
       evidenceUsed: [],
-      reason: `Requirement "${req.requirement}" was not evaluated in primary LLM response. Auto-repaired for 100% coverage.`,
+      reason: `Requirement "${req.requirement}" was not evaluated in primary LLM response. Auto-repaired as insufficient evidence.`,
       limitations: ["Coverage auto-repair applied"],
     };
   });
@@ -156,13 +162,17 @@ export function ensureCompleteCoverage(requirements, auditedResults = []) {
 }
 
 /**
- * Runs AI requirement-by-requirement audit using Groq.
+ * Runs AI requirement-by-requirement audit using Groq with deep evidence provenance.
  *
  * @param {object} params
  * @param {Array<object>} params.requirements
  * @param {object|null} params.submissionData
  * @param {Record<string, object>} params.deterministicChecks
- * @param {Array<object>} params.stage2Findings
+ * @param {Array<object>} [params.stage2Findings=[]]
+ * @param {Array<object>} [params.stage2Chunks=[]]
+ * @param {Array<object>} [params.extractedFiles=[]]
+ * @param {object|null}   [params.projectFingerprint=null]
+ * @param {string|object} [params.contractScope=""]
  * @returns {Promise<Array<object>>} Requirement audit results
  */
 export async function auditRequirementsWithAi({
@@ -171,71 +181,35 @@ export async function auditRequirementsWithAi({
   deterministicChecks,
   stage2Findings = [],
   stage2Chunks = [],
+  extractedFiles = [],
+  projectFingerprint = null,
+  contractScope = "",
 }) {
   if (!requirements || requirements.length === 0) return [];
 
-  // Group Stage 2 findings by scope_item_id + accumulate global findings
-  const globalFindings = [];
-  const findingsByScope = {};
+  if (!process.env.GROQ_API_KEY || process.env.GROQ_API_KEY === "dummy_groq_key") {
+    console.warn("[aiRequirementAuditor] GROQ_API_KEY missing; using deterministic fallback audit.");
+    return deterministicFallbackAudit(requirements, deterministicChecks);
+  }
 
-  stage2Findings.forEach((f) => {
-    const findingStr = `${f.location || "finding"}: ${f.finding_text}`;
-    const fType = f.finding_type || "";
-
-    // Project-wide findings (ZIP summaries, file lists, repo summaries, website reachability) apply to all requirements
-    if (
-      !f.scope_item_id ||
-      fType.startsWith("zip_") ||
-      fType.startsWith("repo_") ||
-      fType.startsWith("website_") ||
-      fType.startsWith("doc_")
-    ) {
-      globalFindings.push(findingStr);
-    } else {
-      const key = f.scope_item_id;
-      if (!findingsByScope[key]) findingsByScope[key] = [];
-      findingsByScope[key].push(findingStr);
-    }
+  // Map each requirement to its most relevant extracted code snippets
+  const reqMatches = matchRequirementsToEvidence({
+    requirements,
+    files: extractedFiles,
+    chunks: stage2Chunks,
+    projectFingerprint,
   });
-
-  // Separate extracted source code chunks from ZIP archives vs documentation / notes
-  const zipExtractedCode = (stage2Chunks || [])
-    .filter((c) => {
-      const loc = (c.source_location || "").toLowerCase();
-      const st = (c.source_type || "").toLowerCase();
-      const isZip = loc.includes(".zip") || st === "zip_entry" || st === "repository";
-      const isLock = loc.includes("lock") || loc.includes(".min.");
-      return isZip && !isLock;
-    })
-    .slice(0, 12)
-    .map((c) => ({
-      file: c.source_location || "archive_file",
-      content_sample: (c.content || c.chunk_text || "").slice(0, 400).replace(/\s+/g, " "),
-    }));
-
-  const documentationNotes = (stage2Chunks || [])
-    .filter((c) => {
-      const loc = (c.source_location || "").toLowerCase();
-      const st = (c.source_type || "").toLowerCase();
-      const isZip = loc.includes(".zip") || st === "zip_entry" || st === "repository";
-      return !isZip;
-    })
-    .slice(0, 5)
-    .map((c) => ({
-      document_source: c.source_location || c.evidence_id || "notes",
-      text_sample: (c.content || c.chunk_text || "").slice(0, 400).replace(/\s+/g, " "),
-    }));
 
   const deliverables = Array.isArray(submissionData?.deliverables)
     ? submissionData.deliverables
     : [];
 
-  // Construct structured audit dataset for prompt without duplicating large code blocks per item
   const auditItems = requirements.map((req) => {
     const sub = deliverables.find(
       (d) => d && (d.scope_item_id === req.scope_item_id || d.id === req.scope_item_id),
     );
     const checks = deterministicChecks[req.criterion_id] || {};
+    const matchData = reqMatches[req.criterion_id] || { matchedFiles: [], matchedSymbols: [], evidenceSnippets: [] };
 
     return {
       criterion_id: req.criterion_id,
@@ -245,73 +219,74 @@ export async function auditRequirementsWithAi({
       required: req.required,
       critical: req.critical,
       provider_claim: (sub?.claim || "No claim provided").slice(0, 300),
-      deterministic_facts: (checks.facts || []).slice(0, 8),
+      deterministic_facts: checks.facts || [],
+      relevant_source_files: matchData.matchedFiles.map((f) => f.path),
+      relevant_symbols: matchData.matchedSymbols,
+      relevant_code_snippets: matchData.evidenceSnippets,
     };
   });
 
   const payloadForModel = {
-    server_verified_zip_files_and_source_code: zipExtractedCode,
-    provider_written_explanation_and_notes: documentationNotes,
-    global_evidence_findings: globalFindings.slice(0, 10),
+    contract_scope_summary: typeof contractScope === "string" ? contractScope : JSON.stringify(contractScope),
+    project_fingerprint: projectFingerprint
+      ? {
+          detected_application: projectFingerprint.primaryDomain.name,
+          confidence: projectFingerprint.primaryDomain.confidence,
+          technologies: projectFingerprint.technologies,
+          routes_sample: (projectFingerprint.routes || []).slice(0, 15),
+          has_auth: projectFingerprint.hasAuthentication,
+          has_tests: projectFingerprint.hasTests,
+        }
+      : "No fingerprint available",
     requirements_to_audit: auditItems,
   };
-
-  if (!process.env.GROQ_API_KEY) {
-    console.warn("[aiRequirementAuditor] GROQ_API_KEY missing; using deterministic fallback audit.");
-    return deterministicFallbackAudit(requirements, deterministicChecks);
-  }
 
   try {
     const response = await groq.chat.completions.create({
       model: GROQ_MODEL,
       temperature: 0.1,
-      max_tokens: 1800,
+      max_tokens: 2200,
       messages: [
         {
           role: "system",
-          content: `You are Escrow's AI Requirement Auditor. Your job is to compare contractual requirements against provider submissions and verified evidence. Do not include internal terms like Stage 2, deterministic mode, or API keys in reasons.
+          content: `You are Escrow's Production Deep AI Evidence Auditor.
+Your duty is to conduct a rigorous, evidence-proven audit of submitted deliverables against contractual requirements.
 
-## EVIDENCE SOURCES:
-1. **server_verified_zip_files_and_code**: Physical source files extracted from inside the submitted ZIP archive (React components, App.jsx, index.html, package.json, styles, etc.). Compare this code against the contractual requirements.
-2. **deterministic_facts**:
-   - \`[ZIP_VERIFIED]\`: Server confirmation of files inside the ZIP archive, file count, and structure.
-   - \`[ZIP_CONTENT]\`: Key snippets extracted directly from files inside the ZIP archive.
-3. **provider_written_explanation_and_notes**: The provider's written explanation, setup notes, and architecture overview.
-4. **provider_claim**: The claim text submitted by the provider.
+## CORE AUDIT PRINCIPLES:
+1. **NEVER equate file existence with functionality**. A file named \`Cart.jsx\` or \`Login.js\` is NOT proof that cart or auth works. You must inspect the actual code snippet.
+2. **NEVER equate successful ZIP extraction with contract delivery**. Processing a ZIP merely means it was uncompressed; it does not mean the contracted work was delivered.
+3. **NEVER trust provider claims over code evidence**. If the provider claims "E-commerce store completed" but the project fingerprint and code show a Calculator or Todo app, detect PROJECT IDENTITY MISMATCH and mark requirements as \`failed\` / \`not_verified\`.
+4. **DO NOT INVENT OR HALLUCINATE EVIDENCE**. Only cite files and functionality that appear in \`relevant_source_files\` or \`relevant_code_snippets\`.
+5. **EVIDENCE PROVENANCE IS MANDATORY**. For every requirement, populate \`evidenceUsed\` with the exact file path(s) used to reach your conclusion.
+6. **VALID STATUS VOCABULARY**:
+   - \`passed\`: Requirement is clearly implemented and evidenced in the source code.
+   - \`passed_with_notes\`: Substantially implemented with minor non-critical caveats.
+   - \`revision_required\`: Partially implemented or major feature missing / needs fixes.
+   - \`failed\`: Contradicted, major project mismatch, or false submission.
+   - \`insufficient_evidence\`: No readable source code or evidence found for this requirement.
+   - \`not_applicable\`: Requirement does not apply to this milestone.
 
-## AUDIT EVALUATION RULES:
-1. **ZIP Implementation Archive**:
-   - Inspect \`server_verified_zip_files_and_code\` and \`deterministic_facts\`.
-   - If source code files (.jsx, .js, .tsx, .html, .css, package.json, README) are present, verify that runnable artifacts and source code have been delivered and award passing status (passed or passed_with_notes, score 80-95).
-2. **Project Summary & Implementation Notes**:
-   - Inspect \`provider_written_explanation_and_notes\`.
-   - If provider provided project overview and setup explanation, evaluate completeness and mark as passed / passed_with_notes.
-3. **Specific Feature Requirements (e.g. Tabs, Client-Side State, React UI)**:
-   - Check the code logic inside \`server_verified_zip_files_and_code\` to verify if the requested features (e.g. All/Active/Completed filters, state hooks) are implemented in the code.
-4. Return ONLY valid JSON matching the schema below:
-
+## OUTPUT FORMAT (JSON ONLY):
 {
   "requirements": [
     {
-      "criterion_id": "d1_ac1",
-      "scope_item_id": "d1",
-      "status": "passed",
-      "confidence": 90,
-      "score": 90,
-      "verified": ["ZIP archive inspected: source code and runnable artifacts verified"],
-      "notVerified": [],
-      "evidenceUsed": ["zip_archive"],
-      "reason": "ZIP archive was server-verified and contains the complete project source code and implementation files.",
-      "limitations": []
+      "criterion_id": "string",
+      "scope_item_id": "string",
+      "status": "passed | passed_with_notes | revision_required | failed | insufficient_evidence | not_applicable",
+      "confidence": 0-100,
+      "score": 0-100,
+      "verified": ["specific capabilities verified in code"],
+      "notVerified": ["specific capabilities missing or unverified"],
+      "evidenceUsed": ["src/components/Cart.jsx", "src/pages/Checkout.jsx"],
+      "reason": "Clear explanation citing the concrete code evidence or specific missing capabilities."
     }
   ]
 }`,
         },
         {
           role: "user",
-          content: `AUDIT THESE REQUIREMENTS AGAINST THE SUBMITTED EVIDENCE AND EXTRACTED ZIP CODE:
+          content: `AUDIT THESE REQUIREMENTS AGAINST THE SUBMITTED EVIDENCE, PROJECT FINGERPRINT, AND EXTRACTED CODE:
 
-AUDIT DATASET:
 ${JSON.stringify(payloadForModel, null, 2)}`,
         },
       ],
@@ -323,11 +298,9 @@ ${JSON.stringify(payloadForModel, null, 2)}`,
       return deterministicFallbackAudit(requirements, deterministicChecks);
     }
 
-    // Strip <think>...</think> reasoning blocks (for reasoning models like qwen)
+    // Strip reasoning blocks and markdown code blocks
     let cleaned = text.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
-    // Strip markdown code fences
     cleaned = cleaned.replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/\s*```$/i, "").trim();
-    // Extract first JSON object/array if extra text wraps it
     const jsonMatch = cleaned.match(/(\{[\s\S]*\}|\[[\s\S]*\])/);
     if (jsonMatch) cleaned = jsonMatch[0];
 
@@ -340,3 +313,4 @@ ${JSON.stringify(payloadForModel, null, 2)}`,
     return deterministicFallbackAudit(requirements, deterministicChecks);
   }
 }
+
