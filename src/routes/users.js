@@ -1022,15 +1022,38 @@ router.post("/kyc/reset", async (req, res, next) => {
   }
 });
 
-// GET /kyc/queue - Get pending KYC submissions (Admin only)
+// GET /kyc/queue - Get all KYC submissions (Admin only), with optional filters
 router.get("/kyc/queue", adminOnly, async (req, res, next) => {
   try {
+    const { status, type, search } = req.query;
+    const conditions = [];
+    const params = [];
+
+    if (status && ["pending", "approved", "rejected"].includes(status)) {
+      conditions.push("k.status = ?");
+      params.push(status);
+    }
+    if (type && ["govt_id", "business"].includes(type)) {
+      conditions.push("k.submission_type = ?");
+      params.push(type);
+    }
+    if (search && search.trim()) {
+      const term = `%${search.trim()}%`;
+      conditions.push("(u.name LIKE ? OR u.email LIKE ? OR k.phone LIKE ? OR k.id_number LIKE ? OR k.biz_name LIKE ?)");
+      params.push(term, term, term, term, term);
+    }
+
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+
     const queue = await db.query(
-      `SELECT k.*, u.name as user_name, u.email as user_email 
-       FROM kyc_submissions k 
-       JOIN users u ON k.user_id = u.id 
-       WHERE k.status = 'pending' 
-       ORDER BY k.created_at ASC`,
+      `SELECT k.*, u.name as user_name, u.email as user_email, u.kyc_tier as current_tier,
+              r.name as reviewer_name
+       FROM kyc_submissions k
+       JOIN users u ON k.user_id = u.id
+       LEFT JOIN users r ON k.reviewed_by = r.id
+       ${whereClause}
+       ORDER BY FIELD(k.status, 'pending', 'rejected', 'approved'), k.created_at DESC`,
+      params,
     );
     res.json(queue);
   } catch (error) {
@@ -1051,8 +1074,8 @@ router.patch("/kyc/approve/:id", adminOnly, async (req, res, next) => {
       return res.status(404).json({ error: "KYC submission not found." });
     }
     const sub = submissions[0];
-    if (sub.status !== "pending") {
-      return res.status(400).json({ error: `Submission is already ${sub.status}.` });
+    if (sub.status === "approved") {
+      return res.status(400).json({ error: "Submission is already approved." });
     }
 
     const isBusiness = sub.submission_type === "business" || !!sub.biz_name || !!sub.biz_file;
@@ -1063,7 +1086,7 @@ router.patch("/kyc/approve/:id", adminOnly, async (req, res, next) => {
 
       await conn.query(
         `UPDATE kyc_submissions
-         SET status = 'approved', reviewed_by = ?, reviewed_at = NOW()
+         SET status = 'approved', rejection_reason = NULL, reviewed_by = ?, reviewed_at = NOW()
          WHERE id = ?`,
         [adminId, submissionId],
       );
@@ -1192,6 +1215,163 @@ router.patch("/kyc/reject/:id", adminOnly, async (req, res, next) => {
       }).catch((e) => console.error("[KYC reject notify]", e));
 
       res.json({ message: "KYC submission rejected successfully." });
+    } catch (err) {
+      await conn.rollback();
+      throw err;
+    } finally {
+      conn.release();
+    }
+  } catch (error) {
+    next(error);
+  }
+});
+
+// PATCH /kyc/submissions/:id - Edit KYC submission details (Admin only)
+router.patch("/kyc/submissions/:id", adminOnly, async (req, res, next) => {
+  const submissionId = req.params.id;
+  const adminId = req.user.id;
+  const { status, id_type, id_number, phone, biz_name, biz_reg, rejection_reason } = req.body;
+
+  try {
+    const submissions = await db.query(
+      "SELECT k.*, u.name as user_name FROM kyc_submissions k JOIN users u ON k.user_id = u.id WHERE k.id = ?",
+      [submissionId],
+    );
+    if (submissions.length === 0) {
+      return res.status(404).json({ error: "KYC submission not found." });
+    }
+    const sub = submissions[0];
+    const isBusiness = sub.submission_type === "business" || !!sub.biz_name || !!sub.biz_file;
+
+    const conn = await db.getPool().getConnection();
+    try {
+      await conn.beginTransaction();
+
+      // Build dynamic update fields
+      const updates = [];
+      const vals = [];
+
+      if (status && ["pending", "approved", "rejected"].includes(status)) {
+        updates.push("status = ?");
+        vals.push(status);
+        updates.push("reviewed_by = ?");
+        vals.push(adminId);
+        updates.push("reviewed_at = NOW()");
+        if (status === "approved") {
+          updates.push("rejection_reason = NULL");
+        }
+      }
+      if (id_type !== undefined) { updates.push("id_type = ?"); vals.push(id_type || null); }
+      if (id_number !== undefined) { updates.push("id_number = ?"); vals.push(id_number || null); }
+      if (phone !== undefined) { updates.push("phone = ?"); vals.push(phone || null); }
+      if (biz_name !== undefined) { updates.push("biz_name = ?"); vals.push(biz_name || null); }
+      if (biz_reg !== undefined) { updates.push("biz_reg = ?"); vals.push(biz_reg || null); }
+      if (rejection_reason !== undefined) { updates.push("rejection_reason = ?"); vals.push(rejection_reason || null); }
+
+      if (updates.length === 0) {
+        conn.release();
+        return res.status(400).json({ error: "No fields to update." });
+      }
+
+      vals.push(submissionId);
+      await conn.query(
+        `UPDATE kyc_submissions SET ${updates.join(", ")} WHERE id = ?`,
+        vals,
+      );
+
+      // Recalculate user kyc_tier based on approved submissions
+      const [approvedGovt] = await conn.query(
+        "SELECT id FROM kyc_submissions WHERE user_id = ? AND (submission_type = 'govt_id' OR (id_file IS NOT NULL AND submission_type IS NULL)) AND status = 'approved' LIMIT 1",
+        [sub.user_id],
+      );
+      const [approvedBiz] = await conn.query(
+        "SELECT id FROM kyc_submissions WHERE user_id = ? AND (submission_type = 'business' OR (biz_file IS NOT NULL AND submission_type IS NULL)) AND status = 'approved' LIMIT 1",
+        [sub.user_id],
+      );
+
+      let targetTier = 1;
+      if (approvedGovt.length > 0 && approvedBiz.length > 0) {
+        targetTier = 3;
+      } else if (approvedGovt.length > 0 || approvedBiz.length > 0) {
+        targetTier = 2;
+      }
+
+      await conn.query("UPDATE users SET kyc_tier = ? WHERE id = ?", [targetTier, sub.user_id]);
+
+      await conn.commit();
+
+      // Notify user on status change
+      const newStatus = status || sub.status;
+      if (status && status !== sub.status) {
+        if (status === "approved") {
+          notify({
+            userId: sub.user_id,
+            type:   NOTIFICATION_TYPE.KYC_APPROVED,
+            data:   { name: sub.user_name, type: isBusiness ? "Business Profile" : "Government ID" },
+            email: true, sms: false, push: true,
+          }).catch((e) => console.error("[KYC edit approve notify]", e));
+        } else if (status === "rejected") {
+          notify({
+            userId: sub.user_id,
+            type:   NOTIFICATION_TYPE.KYC_REJECTED,
+            data:   { name: sub.user_name, reason: rejection_reason || "Admin decision.", type: isBusiness ? "Business Profile" : "Government ID" },
+            email: true, sms: false, push: true,
+          }).catch((e) => console.error("[KYC edit reject notify]", e));
+        }
+      }
+
+      res.json({ message: "KYC submission updated successfully.", target_tier: targetTier });
+    } catch (err) {
+      await conn.rollback();
+      throw err;
+    } finally {
+      conn.release();
+    }
+  } catch (error) {
+    next(error);
+  }
+});
+
+// DELETE /kyc/submissions/:id - Delete a KYC submission (Admin only)
+router.delete("/kyc/submissions/:id", adminOnly, async (req, res, next) => {
+  const submissionId = req.params.id;
+  try {
+    const submissions = await db.query(
+      "SELECT * FROM kyc_submissions WHERE id = ?",
+      [submissionId],
+    );
+    if (submissions.length === 0) {
+      return res.status(404).json({ error: "KYC submission not found." });
+    }
+    const sub = submissions[0];
+
+    const conn = await db.getPool().getConnection();
+    try {
+      await conn.beginTransaction();
+
+      await conn.query("DELETE FROM kyc_submissions WHERE id = ?", [submissionId]);
+
+      // Recalculate user kyc_tier
+      const [approvedGovt] = await conn.query(
+        "SELECT id FROM kyc_submissions WHERE user_id = ? AND (submission_type = 'govt_id' OR (id_file IS NOT NULL AND submission_type IS NULL)) AND status = 'approved' LIMIT 1",
+        [sub.user_id],
+      );
+      const [approvedBiz] = await conn.query(
+        "SELECT id FROM kyc_submissions WHERE user_id = ? AND (submission_type = 'business' OR (biz_file IS NOT NULL AND submission_type IS NULL)) AND status = 'approved' LIMIT 1",
+        [sub.user_id],
+      );
+
+      let targetTier = 1;
+      if (approvedGovt.length > 0 && approvedBiz.length > 0) {
+        targetTier = 3;
+      } else if (approvedGovt.length > 0 || approvedBiz.length > 0) {
+        targetTier = 2;
+      }
+
+      await conn.query("UPDATE users SET kyc_tier = ? WHERE id = ?", [targetTier, sub.user_id]);
+
+      await conn.commit();
+      res.json({ message: "KYC submission deleted successfully.", target_tier: targetTier });
     } catch (err) {
       await conn.rollback();
       throw err;

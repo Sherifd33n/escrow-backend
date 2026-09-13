@@ -29,6 +29,8 @@ import {
   getDisputeAnalyses,
   getLatestDisputeAnalysis,
 } from "../services/disputeAnalysisService.js";
+import { activateSubscription } from "../services/subscriptionService.js";
+import { PLAN_CONFIGS } from "../services/entitlementService.js";
 
 const router = express.Router();
 
@@ -223,7 +225,7 @@ router.get("/transactions", async (req, res, next) => {
 // ─────────────────────────────────────────────────────────────────────────────
 router.get("/users", async (req, res, next) => {
   try {
-    const { page = 1, limit = 20, search, role } = req.query;
+    const { page = 1, limit = 20, search, role, plan } = req.query;
 
     const pageNum  = Math.max(1, parseInt(page)  || 1);
     const limitNum = Math.min(100, Math.max(1, parseInt(limit) || 20));
@@ -237,6 +239,16 @@ router.get("/users", async (req, res, next) => {
     if (role && VALID_ROLES.includes(role)) {
       whereClauses.push("u.role = ?");
       queryParams.push(role);
+    }
+
+    if (plan && plan.trim()) {
+      const p = plan.trim().toLowerCase();
+      if (p === "free") {
+        whereClauses.push("(s.status IS NULL OR s.status != 'active')");
+      } else if (["silver", "gold", "diamond"].includes(p)) {
+        whereClauses.push("s.plan_id = ? AND s.status = 'active'");
+        queryParams.push(p);
+      }
     }
 
     if (search && search.trim()) {
@@ -264,10 +276,18 @@ router.get("/users", async (req, res, next) => {
 
         (SELECT ks.status FROM kyc_submissions ks
          WHERE ks.user_id = u.id
-         ORDER BY ks.created_at DESC LIMIT 1) AS kyc_status
+         ORDER BY ks.created_at DESC LIMIT 1) AS kyc_status,
+
+        s.plan_id AS subscription_plan,
+        s.billing_cycle AS subscription_billing_cycle,
+        s.status AS subscription_status,
+        s.starts_at AS subscription_starts_at,
+        s.ends_at AS subscription_ends_at,
+        s.auto_renew AS subscription_auto_renew
 
       FROM users u
       LEFT JOIN wallets w ON w.user_id = u.id
+      LEFT JOIN subscriptions s ON s.user_id = u.id
 
       ${whereSQL}
 
@@ -284,14 +304,20 @@ router.get("/users", async (req, res, next) => {
         SUM(role = 'client')    AS total_clients,
         SUM(role = 'provider')  AS total_providers,
         SUM(role = 'admin')     AS total_admins,
-        SUM(is_verified = 1)    AS verified_users
-      FROM users
+        SUM(is_verified = 1)    AS verified_users,
+        SUM(s.status = 'active' AND s.plan_id = 'silver') AS total_silver,
+        SUM(s.status = 'active' AND s.plan_id = 'gold') AS total_gold,
+        SUM(s.status = 'active' AND s.plan_id = 'diamond') AS total_diamond,
+        SUM(s.status = 'active') AS total_subscribed
+      FROM users u
+      LEFT JOIN subscriptions s ON s.user_id = u.id
     `);
 
     const [countRow] = await db.query(
       `
       SELECT COUNT(*) AS total
       FROM users u
+      LEFT JOIN subscriptions s ON s.user_id = u.id
       ${whereSQL}
       `,
       queryParams,
@@ -308,6 +334,10 @@ router.get("/users", async (req, res, next) => {
         totalProviders:Number(stats.total_providers)|| 0,
         totalAdmins:   Number(stats.total_admins)   || 0,
         verifiedUsers: Number(stats.verified_users) || 0,
+        totalSilver:   Number(stats.total_silver)   || 0,
+        totalGold:     Number(stats.total_gold)     || 0,
+        totalDiamond:  Number(stats.total_diamond)  || 0,
+        totalSubscribed: Number(stats.total_subscribed) || 0,
       },
       pagination: {
         page:  pageNum,
@@ -315,6 +345,172 @@ router.get("/users", async (req, res, next) => {
         total,
         pages: Math.ceil(total / limitNum),
       },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/admin/users/:id/subscribe
+// Admin grants, upgrades, or activates a subscription plan for a specific user.
+// ─────────────────────────────────────────────────────────────────────────────
+router.post("/users/:id/subscribe", async (req, res, next) => {
+  try {
+    const targetUserId = parseInt(req.params.id, 10);
+    if (!targetUserId || isNaN(targetUserId)) {
+      return res.status(400).json({ error: "Invalid user ID." });
+    }
+
+    const { planId, billingCycle = "monthly", notes, autoRenew = 1 } = req.body;
+
+    if (!planId) {
+      return res.status(400).json({ error: "planId is required (silver, gold, diamond)." });
+    }
+
+    const normalizedPlanId = planId.toLowerCase();
+    if (!PLAN_CONFIGS[normalizedPlanId]) {
+      return res.status(400).json({
+        error: `Invalid plan ID '${planId}'. Allowed plans: ${Object.keys(PLAN_CONFIGS).join(", ")}.`,
+      });
+    }
+
+    const normalizedCycle = ["monthly", "annual"].includes(billingCycle?.toLowerCase())
+      ? billingCycle.toLowerCase()
+      : "monthly";
+
+    // Verify user exists
+    const userRows = await db.query("SELECT id, name, email FROM users WHERE id = ?", [targetUserId]);
+    if (!userRows || userRows.length === 0) {
+      return res.status(404).json({ error: "User not found." });
+    }
+    const targetUser = userRows[0];
+
+    const adminId = req.user.id;
+    const adminName = req.user.name || "Administrator";
+    const refId = `admin_grant_${adminId}_${Date.now()}`;
+
+    const activationResult = await activateSubscription({
+      userId: targetUserId,
+      planId: normalizedPlanId,
+      billingCycle: normalizedCycle,
+      paymentProvider: "admin_grant",
+      providerReferenceId: refId,
+      metadata: {
+        granted_by_admin_id: adminId,
+        granted_by_admin_name: adminName,
+        notes: notes || "Granted directly by admin",
+        granted_at: new Date().toISOString(),
+      },
+    });
+
+    if (autoRenew === 0 || autoRenew === false) {
+      await db.query("UPDATE subscriptions SET auto_renew = 0 WHERE user_id = ?", [targetUserId]);
+    }
+
+    // Notify user
+    const planName = PLAN_CONFIGS[normalizedPlanId]?.name || normalizedPlanId;
+    try {
+      await notify({
+        userId: targetUserId,
+        type: NOTIFICATION_TYPE.WELCOME,
+        data: {
+          title: `Subscription Activated: ${planName} Plan`,
+          message: `An administrator has activated a ${planName} (${normalizedCycle}) subscription for your account.`,
+        },
+        email: true,
+        push: true,
+      });
+    } catch (notifErr) {
+      console.warn("[Admin Subscriptions] Notification failed (non-fatal):", notifErr.message);
+    }
+
+    return res.json({
+      success: true,
+      message: `Successfully subscribed ${targetUser.name} to the ${planName} plan!`,
+      subscription: activationResult,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/admin/users/:id/cancel-subscription
+// Admin cancels, revokes, or immediately expires a user's subscription.
+// ─────────────────────────────────────────────────────────────────────────────
+router.post("/users/:id/cancel-subscription", async (req, res, next) => {
+  try {
+    const targetUserId = parseInt(req.params.id, 10);
+    if (!targetUserId || isNaN(targetUserId)) {
+      return res.status(400).json({ error: "Invalid user ID." });
+    }
+
+    const { action = "cancel", reason = "Cancelled by administrator" } = req.body;
+
+    const userRows = await db.query("SELECT id, name, email FROM users WHERE id = ?", [targetUserId]);
+    if (!userRows || userRows.length === 0) {
+      return res.status(404).json({ error: "User not found." });
+    }
+    const targetUser = userRows[0];
+
+    const subs = await db.query(
+      "SELECT * FROM subscriptions WHERE user_id = ? AND status = 'active'",
+      [targetUserId]
+    );
+
+    if (!subs || subs.length === 0) {
+      return res.status(400).json({ error: "User has no active subscription to cancel." });
+    }
+
+    const sub = subs[0];
+    const now = new Date();
+
+    if (action === "expire_now") {
+      await db.query(
+        `UPDATE subscriptions 
+         SET status = 'expired', auto_renew = 0, ends_at = ?, cancelled_at = ?, pending_plan_id = NULL, pending_billing_cycle = NULL
+         WHERE id = ?`,
+        [now, now, sub.id]
+      );
+
+      await db.query(
+        `INSERT INTO subscriptions_history (user_id, plan_id, billing_cycle, status, starts_at, ends_at, payment_provider, provider_reference_id)
+         VALUES (?, ?, ?, 'expired_by_admin', ?, ?, ?, ?)`,
+        [targetUserId, sub.plan_id, sub.billing_cycle, sub.starts_at, now, sub.payment_provider, sub.provider_reference_id]
+      );
+    } else {
+      await db.query(
+        `UPDATE subscriptions 
+         SET status = 'cancelled', auto_renew = 0, cancelled_at = ?, pending_plan_id = NULL, pending_billing_cycle = NULL
+         WHERE id = ?`,
+        [now, sub.id]
+      );
+
+      await db.query(
+        `INSERT INTO subscriptions_history (user_id, plan_id, billing_cycle, status, starts_at, ends_at, payment_provider, provider_reference_id)
+         VALUES (?, ?, ?, 'cancelled_by_admin', ?, ?, ?, ?)`,
+        [targetUserId, sub.plan_id, sub.billing_cycle, sub.starts_at, sub.ends_at, sub.payment_provider, sub.provider_reference_id]
+      );
+    }
+
+    try {
+      await notify({
+        userId: targetUserId,
+        type: NOTIFICATION_TYPE.SECURITY_ALERT,
+        data: {
+          title: "Subscription Cancelled",
+          message: `Your subscription has been ${action === "expire_now" ? "ended immediately" : "cancelled"} by an administrator. Reason: ${reason}`,
+        },
+        email: true,
+      });
+    } catch (notifErr) {
+      console.warn("[Admin Subscriptions] Notification failed (non-fatal):", notifErr.message);
+    }
+
+    return res.json({
+      success: true,
+      message: `Subscription for ${targetUser.name} has been ${action === "expire_now" ? "ended immediately" : "cancelled"}.`,
     });
   } catch (error) {
     next(error);
