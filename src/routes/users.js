@@ -13,6 +13,7 @@ import { fileURLToPath } from "url";
 import { notify } from "../services/notificationService.js";
 import { NOTIFICATION_TYPE } from "../constants/notificationTypes.js";
 import { otpLimiter } from "../middleware/rateLimiter.js";
+import { uploadFile } from "../config/cloudinary.js";
 
 const router = express.Router();
 
@@ -692,24 +693,11 @@ router.delete("/sessions/:id", async (req, res, next) => {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Configure multer storage
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    const uploadDir = path.join(__dirname, "../../uploads/kyc");
-    if (!fs.existsSync(uploadDir)) {
-      fs.mkdirSync(uploadDir, { recursive: true });
-    }
-    cb(null, uploadDir);
-  },
-  filename: (req, file, cb) => {
-    const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
-    const ext = path.extname(file.originalname);
-    cb(null, file.fieldname + "-" + uniqueSuffix + ext);
-  },
-});
+// Configure multer memory storage
+const kycStorage = multer.memoryStorage();
 
 const upload = multer({
-  storage,
+  storage: kycStorage,
   limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
   fileFilter: (req, file, cb) => {
     const allowedTypes = /jpeg|jpg|png|pdf/;
@@ -738,18 +726,10 @@ router.post("/kyc/submit", kycUpload, async (req, res, next) => {
     const isBiz = biz === "true" || biz === true;
 
     const files = req.files || {};
-    const idFile = files.idFile
-      ? `/uploads/kyc/${files.idFile[0].filename}`
-      : null;
-    const selfieFile = files.selfieFile
-      ? `/uploads/kyc/${files.selfieFile[0].filename}`
-      : null;
-    const bizFile = files.bizFile
-      ? `/uploads/kyc/${files.bizFile[0].filename}`
-      : null;
-    const incorpFile = files.incorpFile
-      ? `/uploads/kyc/${files.incorpFile[0].filename}`
-      : null;
+    const idFile = files.idFile ? await uploadFile(files.idFile[0], "kyc") : null;
+    const selfieFile = files.selfieFile ? await uploadFile(files.selfieFile[0], "kyc") : null;
+    const bizFile = files.bizFile ? await uploadFile(files.bizFile[0], "kyc") : null;
+    const incorpFile = files.incorpFile ? await uploadFile(files.incorpFile[0], "kyc") : null;
 
     const userPhone = phone || req.user.phone || null;
 
@@ -841,14 +821,6 @@ router.post("/kyc/submit", kycUpload, async (req, res, next) => {
       });
     }
   } catch (error) {
-    if (req.files) {
-      Object.values(req.files)
-        .flat()
-        .forEach((file) => {
-          fs.unlink(file.path, () => {});
-        });
-    }
-
     next(error);
   }
 });

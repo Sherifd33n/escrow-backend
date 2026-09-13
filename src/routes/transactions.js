@@ -11,6 +11,7 @@ import multer from "multer";
 import path from "path";
 import { fileURLToPath } from "url";
 import fs from "fs";
+import { uploadFile } from "../config/cloudinary.js";
 
 const router = express.Router();
 
@@ -2920,20 +2921,7 @@ router.get("/:id/review", async (req, res, next) => {
 
 
 // ─── Evidence File Upload ──────────────────────────────────────────────────
-const __dirname_tx = path.dirname(fileURLToPath(import.meta.url));
-
-const evidenceStorage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    const uploadDir = path.join(__dirname_tx, "../../uploads/evidence");
-    if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
-    cb(null, uploadDir);
-  },
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname).toLowerCase();
-    const uniqueName = `${Date.now()}_${crypto.randomBytes(6).toString("hex")}${ext}`;
-    cb(null, uniqueName);
-  },
-});
+const evidenceStorage = multer.memoryStorage();
 
 const evidenceUpload = multer({
   storage: evidenceStorage,
@@ -2968,7 +2956,7 @@ router.post("/evidence/upload", evidenceUpload.single("file"), async (req, res, 
     if (!req.file) {
       return res.status(400).json({ error: "No file uploaded." });
     }
-    const publicUrl = `/uploads/evidence/${req.file.filename}`;
+    const publicUrl = await uploadFile(req.file, "evidence");
     return res.json({
       url: publicUrl,
       original_name: req.file.originalname,
