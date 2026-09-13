@@ -10,18 +10,23 @@ const LOCAL_UPLOADS_ROOT = path.resolve(path.join(__dirname, "../../../uploads")
 
 export const isCloudinaryConfigured = () => {
   return Boolean(
-    process.env.CLOUDINARY_CLOUD_NAME &&
-    process.env.CLOUDINARY_API_KEY &&
-    process.env.CLOUDINARY_API_SECRET
+    process.env.CLOUDINARY_URL ||
+    (process.env.CLOUDINARY_CLOUD_NAME &&
+     process.env.CLOUDINARY_API_KEY &&
+     process.env.CLOUDINARY_API_SECRET)
   );
 };
 
 // Configure Cloudinary if credentials are provided
-if (isCloudinaryConfigured()) {
+if (process.env.CLOUDINARY_URL) {
   cloudinary.config({
-    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-    api_key: process.env.CLOUDINARY_API_KEY,
-    api_secret: process.env.CLOUDINARY_API_SECRET,
+    cloudinary_url: process.env.CLOUDINARY_URL,
+  });
+} else if (isCloudinaryConfigured()) {
+  cloudinary.config({
+    cloud_name: process.env.CLOUDINARY_CLOUD_NAME?.trim(),
+    api_key: process.env.CLOUDINARY_API_KEY?.trim(),
+    api_secret: process.env.CLOUDINARY_API_SECRET?.trim(),
   });
 }
 
@@ -66,11 +71,16 @@ export async function uploadFile(file, subfolder = "kyc") {
   if (!file || !file.buffer) return null;
 
   if (isCloudinaryConfigured()) {
-    const result = await uploadToCloudinary(file.buffer, {
-      folder: `lumbrr/${subfolder}`,
-      resourceType: "auto",
-    });
-    return result.url;
+    try {
+      const result = await uploadToCloudinary(file.buffer, {
+        folder: `lumbrr/${subfolder}`,
+        resourceType: "auto",
+      });
+      return result.url;
+    } catch (err) {
+      console.error(`[Cloudinary Error] Failed to upload ${subfolder} file:`, err);
+      throw new Error(`Cloud storage upload failed: ${err.message || "Unknown error"}`);
+    }
   }
 
   // Fallback to local disk storage if Cloudinary is not configured (e.g. offline local dev)
