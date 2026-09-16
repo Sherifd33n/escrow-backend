@@ -273,6 +273,47 @@ router.get("/verify/:reference", async (req, res, next) => {
   }
 });
 
+// ======================================================
+// SYNC PENDING PAYMENTS (Silent & manual self-healing)
+// ======================================================
+router.post("/sync-pending", async (req, res, next) => {
+  try {
+    const pendingPayments = await db.query(
+      `SELECT reference FROM payments 
+       WHERE user_id = ? AND status = 'pending' AND purpose = 'wallet_funding'
+       ORDER BY created_at DESC LIMIT 5`,
+      [req.user.id]
+    );
+
+    const results = [];
+    let newlyCreditedCount = 0;
+
+    for (const p of pendingPayments) {
+      try {
+        const result = await paymentService.processSuccessfulPayment({ reference: p.reference });
+        if (result.success && !result.alreadyProcessed) {
+          newlyCreditedCount++;
+        }
+        results.push({ reference: p.reference, ...result });
+      } catch (err) {
+        results.push({ reference: p.reference, success: false, error: err.message });
+      }
+    }
+
+    const availableBalance = await getAvailableBalance(req.user.id);
+
+    res.json({
+      success: true,
+      newlyCreditedCount,
+      results,
+      balance: availableBalance,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+
 
 // ======================================================
 // PAYMENT HISTORY
