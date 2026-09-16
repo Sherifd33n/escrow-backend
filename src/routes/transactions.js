@@ -272,19 +272,21 @@ router.get("/", async (req, res, next) => {
               u_buyer.name as buyer_name, u_buyer.email as buyer_email,
               u_seller.name as seller_name, u_seller.email as seller_email
        FROM transactions t
-       JOIN users u_buyer ON t.buyer_id = u_buyer.id
-       JOIN users u_seller ON t.seller_id = u_seller.id
+       LEFT JOIN users u_buyer ON t.buyer_id = u_buyer.id
+       LEFT JOIN users u_seller ON t.seller_id = u_seller.id
        WHERE (t.buyer_id = ? OR t.seller_id = ?)`;
 
     const params = [userId, userId];
 
-    // Enforce transaction history limits for non-admin users
+    // Enforce transaction history limits for non-admin users (only if finite and under 100 years)
     const historyMonths = entitlements.limits.transactionHistoryMonths;
-    if (req.user.role !== "admin" && isFinite(historyMonths) && historyMonths > 0) {
+    if (req.user.role !== "admin" && isFinite(historyMonths) && historyMonths > 0 && historyMonths < 1200) {
       const cutoffDate = new Date();
       cutoffDate.setMonth(cutoffDate.getMonth() - historyMonths);
-      querySql += ` AND t.created_at >= ?`;
-      params.push(cutoffDate);
+      if (!isNaN(cutoffDate.getTime())) {
+        querySql += ` AND t.created_at >= ?`;
+        params.push(cutoffDate);
+      }
     }
 
     querySql += ` ORDER BY t.created_at DESC`;

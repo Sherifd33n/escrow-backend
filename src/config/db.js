@@ -14,6 +14,7 @@ const dbConfig = {
   port: parseInt(process.env.DB_PORT || "3306"),
   user: process.env.DB_USER || "root",
   password: process.env.DB_PASSWORD || "",
+  timezone: "Z",
   multipleStatements: true,
   enableKeepAlive: true,
   keepAliveInitialDelay: 10000,

@@ -219,6 +219,88 @@ router.get("/transactions", async (req, res, next) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// DELETE /api/admin/transactions/:id
+// Admin permanently and totally deletes a transaction and all related records.
+// ─────────────────────────────────────────────────────────────────────────────
+router.delete("/transactions/:id", async (req, res, next) => {
+  const transactionId = parseInt(req.params.id, 10);
+  if (!transactionId || isNaN(transactionId)) {
+    return res.status(400).json({ error: "Invalid transaction ID." });
+  }
+
+  const pool = db.getPool();
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+
+    const [txRows] = await conn.query("SELECT id, txn_code, title FROM transactions WHERE id = ?", [transactionId]);
+    if (!txRows || txRows.length === 0) {
+      await conn.rollback();
+      return res.status(404).json({ error: "Transaction not found." });
+    }
+    const tx = txRows[0];
+
+    // 1. Disputes & messages
+    const [disputeRows] = await conn.query("SELECT id FROM disputes WHERE transaction_id = ?", [transactionId]);
+    if (disputeRows.length > 0) {
+      const disputeIds = disputeRows.map((d) => d.id);
+      await conn.query("DELETE FROM dispute_messages WHERE dispute_id IN (?)", [disputeIds]);
+      await conn.query("DELETE FROM disputes WHERE id IN (?)", [disputeIds]);
+    }
+
+    // 2. AI audits & dispute analyses
+    await conn.query("DELETE FROM ai_dispute_analyses WHERE transaction_id = ?", [transactionId]);
+    await conn.query("DELETE FROM ai_audits WHERE transaction_id = ?", [transactionId]);
+
+    // 3. Audit jobs & analyzer results & snapshots
+    const [jobRows] = await conn.query("SELECT id FROM audit_jobs WHERE transaction_id = ?", [transactionId]);
+    if (jobRows.length > 0) {
+      const jobIds = jobRows.map((j) => j.id);
+      await conn.query("DELETE FROM analyzer_results WHERE audit_job_id IN (?)", [jobIds]);
+      await conn.query("DELETE FROM audit_jobs WHERE id IN (?)", [jobIds]);
+    }
+    await conn.query("DELETE FROM audit_snapshots WHERE transaction_id = ?", [transactionId]);
+
+    // 4. Evidence items, findings, chunks, and processing results
+    await conn.query("DELETE FROM evidence_findings WHERE transaction_id = ?", [transactionId]);
+    await conn.query("DELETE FROM evidence_chunks WHERE transaction_id = ?", [transactionId]);
+    const [evRows] = await conn.query("SELECT id FROM evidence_items WHERE transaction_id = ?", [transactionId]);
+    if (evRows.length > 0) {
+      const evIds = evRows.map((e) => e.id);
+      await conn.query("DELETE FROM evidence_processing_results WHERE evidence_item_id IN (?)", [evIds]);
+      await conn.query("DELETE FROM analyzer_results WHERE evidence_item_id IN (?)", [evIds]);
+      await conn.query("DELETE FROM evidence_items WHERE id IN (?)", [evIds]);
+    }
+
+    // 5. Revision requests, milestone submissions, and milestones
+    await conn.query("DELETE FROM revision_requests WHERE transaction_id = ?", [transactionId]);
+    await conn.query("DELETE FROM milestone_submissions WHERE transaction_id = ?", [transactionId]);
+    await conn.query("DELETE FROM milestones WHERE transaction_id = ?", [transactionId]);
+
+    // 6. Scope items, criteria, reviews, events
+    await conn.query("DELETE FROM acceptance_criteria WHERE transaction_id = ?", [transactionId]);
+    await conn.query("DELETE FROM transaction_scope_items WHERE transaction_id = ?", [transactionId]);
+    await conn.query("DELETE FROM reviews WHERE transaction_id = ?", [transactionId]);
+    await conn.query("DELETE FROM transaction_events WHERE transaction_id = ?", [transactionId]);
+
+    // 7. Delete the transaction record itself
+    await conn.query("DELETE FROM transactions WHERE id = ?", [transactionId]);
+
+    await conn.commit();
+
+    return res.json({
+      success: true,
+      message: `Transaction #${tx.txn_code || transactionId} (${tx.title}) deleted successfully.`,
+    });
+  } catch (error) {
+    await conn.rollback();
+    next(error);
+  } finally {
+    conn.release();
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // GET /api/admin/users
 // Returns all users with their wallet balance and a stats summary.
 // Query params: ?page=1 &limit=20 &search=alice &role=client
@@ -348,6 +430,119 @@ router.get("/users", async (req, res, next) => {
     });
   } catch (error) {
     next(error);
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DELETE /api/admin/users/:id
+// Admin permanently deletes a user account and all associated records.
+// ─────────────────────────────────────────────────────────────────────────────
+router.delete("/users/:id", async (req, res, next) => {
+  const targetUserId = parseInt(req.params.id, 10);
+  if (!targetUserId || isNaN(targetUserId)) {
+    return res.status(400).json({ error: "Invalid user ID." });
+  }
+
+  if (targetUserId === req.user.id) {
+    return res.status(400).json({ error: "You cannot delete your own admin account." });
+  }
+
+  const pool = db.getPool();
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+
+    const [userRows] = await conn.query("SELECT id, name, email FROM users WHERE id = ?", [targetUserId]);
+    if (!userRows || userRows.length === 0) {
+      await conn.rollback();
+      return res.status(404).json({ error: "User not found." });
+    }
+    const targetUser = userRows[0];
+
+    // 1. Find all transactions where user is buyer or seller and delete them completely
+    const [userTxs] = await conn.query(
+      "SELECT id FROM transactions WHERE buyer_id = ? OR seller_id = ?",
+      [targetUserId, targetUserId]
+    );
+
+    for (const tx of userTxs) {
+      const transactionId = tx.id;
+      const [disputeRows] = await conn.query("SELECT id FROM disputes WHERE transaction_id = ?", [transactionId]);
+      if (disputeRows.length > 0) {
+        const disputeIds = disputeRows.map((d) => d.id);
+        await conn.query("DELETE FROM dispute_messages WHERE dispute_id IN (?)", [disputeIds]);
+        await conn.query("DELETE FROM disputes WHERE id IN (?)", [disputeIds]);
+      }
+      await conn.query("DELETE FROM ai_dispute_analyses WHERE transaction_id = ?", [transactionId]);
+      await conn.query("DELETE FROM ai_audits WHERE transaction_id = ?", [transactionId]);
+      const [jobRows] = await conn.query("SELECT id FROM audit_jobs WHERE transaction_id = ?", [transactionId]);
+      if (jobRows.length > 0) {
+        const jobIds = jobRows.map((j) => j.id);
+        await conn.query("DELETE FROM analyzer_results WHERE audit_job_id IN (?)", [jobIds]);
+        await conn.query("DELETE FROM audit_jobs WHERE id IN (?)", [jobIds]);
+      }
+      await conn.query("DELETE FROM audit_snapshots WHERE transaction_id = ?", [transactionId]);
+      await conn.query("DELETE FROM evidence_findings WHERE transaction_id = ?", [transactionId]);
+      await conn.query("DELETE FROM evidence_chunks WHERE transaction_id = ?", [transactionId]);
+      const [evRows] = await conn.query("SELECT id FROM evidence_items WHERE transaction_id = ?", [transactionId]);
+      if (evRows.length > 0) {
+        const evIds = evRows.map((e) => e.id);
+        await conn.query("DELETE FROM evidence_processing_results WHERE evidence_item_id IN (?)", [evIds]);
+        await conn.query("DELETE FROM analyzer_results WHERE evidence_item_id IN (?)", [evIds]);
+        await conn.query("DELETE FROM evidence_items WHERE id IN (?)", [evIds]);
+      }
+      await conn.query("DELETE FROM revision_requests WHERE transaction_id = ?", [transactionId]);
+      await conn.query("DELETE FROM milestone_submissions WHERE transaction_id = ?", [transactionId]);
+      await conn.query("DELETE FROM milestones WHERE transaction_id = ?", [transactionId]);
+      await conn.query("DELETE FROM acceptance_criteria WHERE transaction_id = ?", [transactionId]);
+      await conn.query("DELETE FROM transaction_scope_items WHERE transaction_id = ?", [transactionId]);
+      await conn.query("DELETE FROM reviews WHERE transaction_id = ?", [transactionId]);
+      await conn.query("DELETE FROM transaction_events WHERE transaction_id = ?", [transactionId]);
+      await conn.query("DELETE FROM transactions WHERE id = ?", [transactionId]);
+    }
+
+    // 2. User direct references
+    await conn.query("DELETE FROM dispute_messages WHERE user_id = ?", [targetUserId]);
+    await conn.query("DELETE FROM disputes WHERE filed_by = ?", [targetUserId]);
+    await conn.query("DELETE FROM ai_audits WHERE audited_by = ?", [targetUserId]);
+    await conn.query("DELETE FROM ai_usage WHERE user_id = ?", [targetUserId]);
+    await conn.query("DELETE FROM milestone_submissions WHERE submitted_by = ?", [targetUserId]);
+    await conn.query("DELETE FROM revision_requests WHERE requested_by = ?", [targetUserId]);
+    await conn.query("DELETE FROM reviews WHERE reviewer_id = ? OR reviewee_id = ?", [targetUserId, targetUserId]);
+    await conn.query("DELETE FROM notifications WHERE user_id = ?", [targetUserId]);
+    await conn.query("DELETE FROM push_subscriptions WHERE user_id = ?", [targetUserId]);
+    await conn.query("DELETE FROM otp_codes WHERE user_id = ?", [targetUserId]);
+    await conn.query("DELETE FROM kyc_submissions WHERE user_id = ?", [targetUserId]);
+    await conn.query("DELETE FROM subscriptions_history WHERE user_id = ?", [targetUserId]);
+    await conn.query("DELETE FROM subscriptions WHERE user_id = ?", [targetUserId]);
+    await conn.query("DELETE FROM user_sessions WHERE user_id = ?", [targetUserId]);
+    await conn.query("DELETE FROM withdrawals WHERE user_id = ?", [targetUserId]);
+    await conn.query("DELETE FROM bank_accounts WHERE user_id = ?", [targetUserId]);
+    await conn.query("DELETE FROM payments WHERE user_id = ?", [targetUserId]);
+
+    // Wallets & transactions
+    const [userWallets] = await conn.query("SELECT id FROM wallets WHERE user_id = ?", [targetUserId]);
+    if (userWallets.length > 0) {
+      const walletIds = userWallets.map((w) => w.id);
+      await conn.query("DELETE FROM wallet_transactions WHERE wallet_id IN (?)", [walletIds]);
+      await conn.query("DELETE FROM wallets WHERE id IN (?)", [walletIds]);
+    }
+    await conn.query("DELETE FROM transaction_events WHERE user_id = ?", [targetUserId]);
+
+    // 3. Delete user record
+    await conn.query("DELETE FROM users WHERE id = ?", [targetUserId]);
+
+    await conn.commit();
+
+    return res.json({
+      success: true,
+      message: `User ${targetUser.name} (${targetUser.email}) and all associated records were permanently deleted.`,
+    });
+  } catch (error) {
+    await conn.rollback();
+    next(error);
+  } finally {
+    conn.release();
   }
 });
 

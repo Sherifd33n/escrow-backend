@@ -69,10 +69,11 @@ export async function processSuccessfulPayment({ reference, providerData = null,
     }
 
     // 5. Amount Verification (Paystack returns amount in kobo)
-    const expectedKobo = BigInt(payment.amount_kobo);
-    const actualKobo = BigInt(pData.amount);
+    const expectedKobo = Number(payment.amount_kobo);
+    const actualKobo = Number(pData.amount);
 
-    if (expectedKobo !== actualKobo) {
+    // Allow up to 100 kobo (1 NGN) tolerance for edge-case payment gateway fee rounding
+    if (isNaN(actualKobo) || Math.abs(expectedKobo - actualKobo) > 100) {
       console.error(
         `[PaymentService] Amount mismatch for ${reference}: expected ${expectedKobo} kobo, got ${actualKobo} kobo`
       );
@@ -148,24 +149,26 @@ export async function processSuccessfulPayment({ reference, providerData = null,
       ]
     );
 
+    const sendNotification = () => {
+      notify({
+        userId: payment.user_id,
+        type: NOTIFICATION_TYPE.WALLET_FUNDED,
+        data: {
+          amount: creditAmountUSD.toFixed(2),
+          balance: newBalance.toFixed(2),
+        },
+        email: true,
+        sms: true,
+        push: true,
+      }).catch((err) =>
+        console.error("[PaymentService] Failed to trigger Wallet Funded notification:", err)
+      );
+    };
+
     if (ownConnection) {
       await conn.commit();
+      sendNotification();
     }
-
-    // 10. Send Notification (non-blocking)
-    notify({
-      userId: payment.user_id,
-      type: NOTIFICATION_TYPE.WALLET_FUNDED,
-      data: {
-        amount: creditAmountUSD.toFixed(2),
-        balance: newBalance.toFixed(2),
-      },
-      email: true,
-      sms: true,
-      push: true,
-    }).catch((err) =>
-      console.error("[PaymentService] Failed to trigger Wallet Funded notification:", err)
-    );
 
     return {
       alreadyProcessed: false,
@@ -173,6 +176,7 @@ export async function processSuccessfulPayment({ reference, providerData = null,
       balance: newBalance,
       reference,
       walletTxId,
+      sendNotification,
     };
   } catch (error) {
     if (ownConnection) {

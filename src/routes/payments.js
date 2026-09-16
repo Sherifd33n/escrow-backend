@@ -58,6 +58,7 @@ router.post("/webhook/paystack", async (req, res) => {
     );
 
     // Process event based on type
+    let postCommitCallback = null;
     switch (eventType) {
       case "charge.success": {
         const paymentPurpose = eventData.metadata?.purpose;
@@ -68,11 +69,14 @@ router.post("/webhook/paystack", async (req, res) => {
           await verifyAndActivateSubscriptionPayment(providerRef, null);
         } else {
           // Wallet-funding payment (default)
-          await paymentService.processSuccessfulPayment({
+          const result = await paymentService.processSuccessfulPayment({
             reference: providerRef,
             providerData: eventData,
             passedConn: conn,
           });
+          if (result && typeof result.sendNotification === "function") {
+            postCommitCallback = result.sendNotification;
+          }
         }
         break;
       }
@@ -109,6 +113,9 @@ router.post("/webhook/paystack", async (req, res) => {
     }
 
     await conn.commit();
+    if (typeof postCommitCallback === "function") {
+      postCommitCallback();
+    }
     return res.status(200).json({ status: "success" });
   } catch (error) {
     await conn.rollback();
@@ -173,13 +180,14 @@ router.post("/initialize", async (req, res, next) => {
     );
 
     // 3. Call Paystack API to initialize transaction
+    const resolvedCallbackUrl = req.body.callbackUrl || process.env.PAYSTACK_CALLBACK_URL;
     let paystackResponse;
     try {
       paystackResponse = await paystackService.initializeTransaction({
         email: req.user.email,
         amountKobo,
         reference,
-        callbackUrl: process.env.PAYSTACK_CALLBACK_URL,
+        callbackUrl: resolvedCallbackUrl,
         metadata: {
           user_id: req.user.id,
           purpose: "wallet_funding",
