@@ -114,20 +114,35 @@ export async function processSuccessfulPayment({ reference, providerData = null,
 
     // 8. Create Ledger Entry in wallet_transactions
     const walletRef = `REF-DEP-${crypto.randomInt(100000, 999999)}`;
-    const ngnFormatted = (Number(payment.amount_kobo) / 100).toLocaleString();
+    const ngnAmount = Number(payment.amount_kobo) / 100;
+    const ngnFormatted = ngnAmount.toLocaleString();
     const rateText = payment.exchange_rate
       ? ` (Rate: ₦${parseFloat(payment.exchange_rate).toLocaleString()}/$)`
       : "";
 
+    const metaData = {
+      payment_id: payment.id,
+      paystack_reference: payment.reference,
+      amount_kobo: payment.amount_kobo,
+      amount_ngn: ngnAmount,
+      exchange_rate: payment.exchange_rate,
+      gateway_transaction_id: String(pData.id || pData.transaction_id || ""),
+      gateway_channel: pData.channel || null,
+      customer_email: pData.customer?.email || null,
+    };
+
     const [txResult] = await conn.query(
       `INSERT INTO wallet_transactions
-       (wallet_id, type, amount, currency, description, reference)
-       VALUES (?, 'deposit', ?, 'USD', ?, ?)`,
+       (wallet_id, type, amount, currency, description, reference, balance_before, balance_after, metadata, status)
+       VALUES (?, 'deposit', ?, 'USD', ?, ?, ?, ?, ?, 'completed')`,
       [
         wallet.id,
         creditAmountUSD,
         `Paystack Deposit of ₦${ngnFormatted} converted to $${creditAmountUSD.toFixed(2)}${rateText}`,
         walletRef,
+        parseFloat(wallet.balance) || 0,
+        newBalance,
+        JSON.stringify(metaData),
       ]
     );
 

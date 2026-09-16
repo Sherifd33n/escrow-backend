@@ -560,11 +560,11 @@ WHERE is_verified IS NULL;
     console.error("Migration failed to clean up unverified subscriptions:", err);
   }
 
-  // Update wallet_transactions.type ENUM to include 'subscription' and 'escrow_fee'
+  // Update wallet_transactions.type ENUM to include 'subscription', 'escrow_fee', and 'adjustment'
   try {
     await conn.query(`
       ALTER TABLE wallet_transactions
-      MODIFY COLUMN type ENUM('deposit', 'withdrawal', 'escrow_hold', 'escrow_release', 'escrow_refund', 'subscription', 'escrow_fee') NOT NULL
+      MODIFY COLUMN type ENUM('deposit', 'withdrawal', 'escrow_hold', 'escrow_release', 'escrow_refund', 'subscription', 'escrow_fee', 'adjustment') NOT NULL
     `);
   } catch (err) {
     console.error("Migration failed to update wallet_transactions.type ENUM:", err);
@@ -579,6 +579,61 @@ WHERE is_verified IS NULL;
     }
   } catch (err) {
     console.error("Migration failed to add wallet_transactions.currency:", err);
+  }
+
+  // Ensure wallet_transactions has balance_before column
+  try {
+    const [wtBbCols] = await conn.query("SHOW COLUMNS FROM wallet_transactions LIKE 'balance_before'");
+    if (wtBbCols.length === 0) {
+      await conn.query("ALTER TABLE wallet_transactions ADD COLUMN `balance_before` DECIMAL(15,2) NULL DEFAULT NULL");
+      console.log("Migration: Added wallet_transactions.balance_before column.");
+    }
+  } catch (err) {
+    console.error("Migration failed to add wallet_transactions.balance_before:", err);
+  }
+
+  // Ensure wallet_transactions has balance_after column
+  try {
+    const [wtBaCols] = await conn.query("SHOW COLUMNS FROM wallet_transactions LIKE 'balance_after'");
+    if (wtBaCols.length === 0) {
+      await conn.query("ALTER TABLE wallet_transactions ADD COLUMN `balance_after` DECIMAL(15,2) NULL DEFAULT NULL");
+      console.log("Migration: Added wallet_transactions.balance_after column.");
+    }
+  } catch (err) {
+    console.error("Migration failed to add wallet_transactions.balance_after:", err);
+  }
+
+  // Ensure wallet_transactions has metadata column
+  try {
+    const [wtMetaCols] = await conn.query("SHOW COLUMNS FROM wallet_transactions LIKE 'metadata'");
+    if (wtMetaCols.length === 0) {
+      await conn.query("ALTER TABLE wallet_transactions ADD COLUMN `metadata` JSON NULL DEFAULT NULL");
+      console.log("Migration: Added wallet_transactions.metadata column.");
+    }
+  } catch (err) {
+    console.error("Migration failed to add wallet_transactions.metadata:", err);
+  }
+
+  // Ensure wallet_transactions has status column
+  try {
+    const [wtStatusCols] = await conn.query("SHOW COLUMNS FROM wallet_transactions LIKE 'status'");
+    if (wtStatusCols.length === 0) {
+      await conn.query("ALTER TABLE wallet_transactions ADD COLUMN `status` ENUM('completed', 'pending', 'failed', 'reversed') NOT NULL DEFAULT 'completed'");
+      console.log("Migration: Added wallet_transactions.status column.");
+    }
+  } catch (err) {
+    console.error("Migration failed to add wallet_transactions.status:", err);
+  }
+
+  // Ensure index on wallet_transactions(wallet_id, created_at)
+  try {
+    const [wtIdx] = await conn.query("SHOW INDEX FROM wallet_transactions WHERE Key_name = 'idx_wt_wallet_created'");
+    if (wtIdx.length === 0) {
+      await conn.query("ALTER TABLE wallet_transactions ADD INDEX `idx_wt_wallet_created` (`wallet_id`, `created_at`)");
+      console.log("Migration: Added idx_wt_wallet_created index.");
+    }
+  } catch (err) {
+    // Non-critical index error
   }
 
   // ----------------------------------------------------

@@ -110,16 +110,29 @@ router.post("/", async (req, res, next) => {
     ]);
 
     // 7. Insert wallet transaction record
+    const withdrawalMeta = {
+      bank_account_id: bankAccount.id,
+      bank_name: bankAccount.bank_name,
+      account_number_masked: `****${bankAccount.account_number.slice(-4)}`,
+      account_name: bankAccount.account_name,
+      amount_ngn: ngnAmount,
+      exchange_rate: usdToNgnRate,
+      recipient_code: bankAccount.recipient_code,
+    };
+
     const [wtxResult] = await conn.query(
       `INSERT INTO wallet_transactions
-       (wallet_id, type, amount, currency, description, reference)
-       VALUES (?, 'withdrawal', ?, ?, ?, ?)`,
+       (wallet_id, type, amount, currency, description, reference, balance_before, balance_after, metadata, status)
+       VALUES (?, 'withdrawal', ?, ?, ?, ?, ?, ?, ?, 'completed')`,
       [
         wallet.id,
         withdrawAmountUSD,
         wallet.currency || 'USD',
         `Bank Payout of ₦${ngnAmount.toLocaleString()} to ${bankAccount.bank_name} (${bankAccount.account_number.slice(-4)})`,
         reference,
+        parseFloat(wallet.balance) || 0,
+        newBalance,
+        JSON.stringify(withdrawalMeta),
       ]
     );
 

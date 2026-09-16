@@ -442,21 +442,35 @@ export async function initiateSubscriptionPayment(userId, planId, billingCycle, 
       const reference = `SUB-WAL-${Date.now()}-${crypto.randomInt(1000, 9999)}`;
 
       // 1. Deduct subscription cost from wallet balance
+      const balBefore = parseFloat(wallet.balance) || 0;
+      const balAfter = balBefore - costUSD;
+
       await conn.query(
         "UPDATE wallets SET balance = balance - ? WHERE id = ?",
         [costUSD, wallet.id]
       );
 
+      const subMetadata = {
+        plan_id: normalizedPlanId,
+        plan_name: targetPlan.name,
+        billing_cycle: cycle,
+        user_email: userEmail,
+        payment_method: "wallet",
+      };
+
       // 2. Record ledger entry in wallet_transactions
       const [txResult] = await conn.query(
         `INSERT INTO wallet_transactions
-         (wallet_id, type, amount, currency, description, reference)
-         VALUES (?, 'subscription', ?, 'USD', ?, ?)`,
+         (wallet_id, type, amount, currency, description, reference, balance_before, balance_after, metadata, status)
+         VALUES (?, 'subscription', ?, 'USD', ?, ?, ?, ?, ?, 'completed')`,
         [
           wallet.id,
           costUSD,
           `Wallet Subscription Payment for ${targetPlan.name} Plan (${cycle})`,
           reference,
+          balBefore,
+          balAfter,
+          JSON.stringify(subMetadata),
         ]
       );
 

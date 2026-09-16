@@ -16,11 +16,13 @@
     "dotenv": "^16.5.0",
     "express": "^5.1.0",
     "express-rate-limit": "^8.6.2",
+    "fontkit": "^2.0.4",
     "jsonwebtoken": "^9.0.2",
     "multer": "^2.2.0",
     "mysql2": "^3.14.1",
     "nodemailer": "^7.0.5",
     "openai": "^6.49.0",
+    "pdfkit": "^0.16.0",
     "twilio": "^6.0.2",
     "web-push": "^3.6.7"
   }

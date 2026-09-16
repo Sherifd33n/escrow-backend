@@ -450,36 +450,77 @@ const TEMPLATES = {
   [NOTIFICATION_TYPE.WALLET_FUNDED]: {
     title:        "Wallet Funded",
     message:      "Your wallet has been credited with ${{amount}}. New balance: ${{balance}}.",
-    emailSubject: "Wallet Deposit Successful — ${{amount}}",
+    emailSubject: "Lumbrr — Wallet Deposit Confirmed (${{amount}})",
     emailBody: (d) => emailWrap("Wallet Deposit Successful", `
-      <h2 style="margin-top:0;color:#001637;">Wallet Funded</h2>
-      <p>Hi ${d.name || "there"},</p>
-      <p>Your deposit of <strong>$${d.amount}</strong> was confirmed successfully and credited to your wallet.</p>
-      <p><strong>Available Balance:</strong> $${d.balance}</p>`),
-    smsText: "Escrow: Your wallet has been credited with ${{amount}}. New balance: ${{balance}}.",
+      <h2 style="margin-top:0;color:#006c47;">Wallet Funded Successfully ✓</h2>
+      <p style="font-size:15px;color:#44474e;">Hi ${d.name || "there"},</p>
+      <p style="font-size:15px;color:#44474e;">Your deposit has been processed and credited to your Lumbrr wallet.</p>
+      
+      <table style="width:100%;border-collapse:collapse;margin:20px 0;background:#f8f9fa;border-radius:8px;overflow:hidden;border:1px solid #e9e7eb;">
+        <tr style="border-bottom:1px solid #e9e7eb;">
+          <td style="padding:12px 16px;color:#75777f;font-size:13.5px;font-weight:600;">Credit Amount:</td>
+          <td style="padding:12px 16px;color:#006c47;font-size:15px;font-weight:700;text-align:right;">+$${d.amount} USD</td>
+        </tr>
+        ${d.amountNgn ? `
+        <tr style="border-bottom:1px solid #e9e7eb;">
+          <td style="padding:12px 16px;color:#75777f;font-size:13.5px;font-weight:600;">Local Amount:</td>
+          <td style="padding:12px 16px;color:#001637;font-size:14px;font-weight:600;text-align:right;">₦${d.amountNgn}</td>
+        </tr>` : ""}
+        ${d.reference ? `
+        <tr style="border-bottom:1px solid #e9e7eb;">
+          <td style="padding:12px 16px;color:#75777f;font-size:13.5px;font-weight:600;">Reference ID:</td>
+          <td style="padding:12px 16px;color:#001637;font-size:13.5px;font-family:monospace;font-weight:600;text-align:right;">${d.reference}</td>
+        </tr>` : ""}
+        <tr>
+          <td style="padding:12px 16px;color:#75777f;font-size:13.5px;font-weight:600;">Available Balance:</td>
+          <td style="padding:12px 16px;color:#001637;font-size:15px;font-weight:700;text-align:right;">$${d.balance} USD</td>
+        </tr>
+      </table>
+
+      <p style="font-size:13px;color:#75777f;">You can view your complete transaction history or download official statements anytime from your Lumbrr dashboard.</p>`),
+    smsText: "Lumbrr: Your wallet has been credited with ${{amount}}. New balance: ${{balance}}.",
   },
 
   [NOTIFICATION_TYPE.WALLET_WITHDRAWN]: {
     title:        "Withdrawal Processed",
     message:      "Withdrawal of ${{amount}} has been initiated to your bank account.",
-    emailSubject: "Withdrawal Initiated — ${{amount}}",
+    emailSubject: "Lumbrr — Withdrawal Initiated (${{amount}})",
     emailBody: (d) => emailWrap("Withdrawal Initiated", `
-      <h2 style="margin-top:0;color:#001637;">Withdrawal Processing</h2>
-      <p>Hi ${d.name || "there"},</p>
-      <p>Your withdrawal request of <strong>$${d.amount}</strong> is being processed by your bank. Reference: ${d.reference || "N/A"}.</p>`),
-    smsText: "Escrow: Your withdrawal request of ${{amount}} is processing.",
+      <h2 style="margin-top:0;color:#001637;">Withdrawal In Progress ⏳</h2>
+      <p style="font-size:15px;color:#44474e;">Hi ${d.name || "there"},</p>
+      <p style="font-size:15px;color:#44474e;">Your withdrawal request has been received and is being processed for payout to your registered bank account.</p>
+      
+      <table style="width:100%;border-collapse:collapse;margin:20px 0;background:#f8f9fa;border-radius:8px;overflow:hidden;border:1px solid #e9e7eb;">
+        <tr style="border-bottom:1px solid #e9e7eb;">
+          <td style="padding:12px 16px;color:#75777f;font-size:13.5px;font-weight:600;">Withdrawal Amount:</td>
+          <td style="padding:12px 16px;color:#ba1a1a;font-size:15px;font-weight:700;text-align:right;">-$${d.amount} USD</td>
+        </tr>
+        ${d.reference ? `
+        <tr style="border-bottom:1px solid #e9e7eb;">
+          <td style="padding:12px 16px;color:#75777f;font-size:13.5px;font-weight:600;">Reference ID:</td>
+          <td style="padding:12px 16px;color:#001637;font-size:13.5px;font-family:monospace;font-weight:600;text-align:right;">${d.reference}</td>
+        </tr>` : ""}
+        ${d.balance ? `
+        <tr>
+          <td style="padding:12px 16px;color:#75777f;font-size:13.5px;font-weight:600;">Remaining Balance:</td>
+          <td style="padding:12px 16px;color:#001637;font-size:15px;font-weight:700;text-align:right;">$${d.balance} USD</td>
+        </tr>` : ""}
+      </table>
+
+      <p style="font-size:13px;color:#75777f;">Payouts usually arrive in your bank account within 10 to 60 minutes depending on your bank's network.</p>`),
+    smsText: "Lumbrr: Your withdrawal request of ${{amount}} is processing.",
   },
 
   [NOTIFICATION_TYPE.WALLET_REFUNDED]: {
     title:        "Funds Restored",
     message:      "Restored ${{amount}} to your wallet. Reason: {{reason}}.",
-    emailSubject: "Funds Restored to Wallet — ${{amount}}",
+    emailSubject: "Lumbrr — Wallet Balance Restored (${{amount}})",
     emailBody: (d) => emailWrap("Funds Restored", `
-      <h2 style="margin-top:0;color:#001637;">Wallet Balance Restored</h2>
-      <p>Hi ${d.name || "there"},</p>
-      <p>An amount of <strong>$${d.amount}</strong> has been restored to your wallet.</p>
-      <p><strong>Reason:</strong> ${d.reason || "Withdrawal unsuccessful"}</p>`),
-    smsText: "Escrow: ${{amount}} has been restored to your wallet.",
+      <h2 style="margin-top:0;color:#006c47;">Wallet Balance Restored ✓</h2>
+      <p style="font-size:15px;color:#44474e;">Hi ${d.name || "there"},</p>
+      <p style="font-size:15px;color:#44474e;">An amount of <strong>$${d.amount}</strong> has been restored to your wallet.</p>
+      <p style="font-size:14px;color:#555;"><strong>Reason:</strong> ${d.reason || "Dispute refund / adjustment"}</p>`),
+    smsText: "Lumbrr: ${{amount}} has been restored to your wallet.",
   },
 
   [NOTIFICATION_TYPE.PAYMENT_FAILED]: {

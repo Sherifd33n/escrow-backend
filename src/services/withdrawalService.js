@@ -112,6 +112,9 @@ export async function processWithdrawalFailure({
       const wallet = wallets[0];
       const restoreAmount = parseFloat(withdrawal.amount);
 
+      const balBefore = parseFloat(wallet.balance) || 0;
+      const balAfter = balBefore + restoreAmount;
+
       // Restore funds to wallet
       await conn.query("UPDATE wallets SET balance = balance + ? WHERE id = ?", [
         restoreAmount,
@@ -122,14 +125,17 @@ export async function processWithdrawalFailure({
       const refCode = `REF-WTH-FAIL-${crypto.randomInt(100000, 999999)}`;
       await conn.query(
         `INSERT INTO wallet_transactions
-         (wallet_id, type, amount, currency, description, reference)
-         VALUES (?, 'deposit', ?, ?, ?, ?)`,
+         (wallet_id, type, amount, currency, description, reference, balance_before, balance_after, metadata, status)
+         VALUES (?, 'deposit', ?, ?, ?, ?, ?, ?, ?, 'completed')`,
         [
           wallet.id,
           restoreAmount,
           wallet.currency || 'USD',
           `Failed Withdrawal Refund (${reason}) [Ref: ${reference}]`,
           refCode,
+          balBefore,
+          balAfter,
+          JSON.stringify({ withdrawal_id: withdrawal.id, reason, reference }),
         ]
       );
     }
@@ -212,6 +218,9 @@ export async function processWithdrawalReversal({
       const wallet = wallets[0];
       const restoreAmount = parseFloat(withdrawal.amount);
 
+      const balBefore = parseFloat(wallet.balance) || 0;
+      const balAfter = balBefore + restoreAmount;
+
       // Restore balance
       await conn.query("UPDATE wallets SET balance = balance + ? WHERE id = ?", [
         restoreAmount,
@@ -222,14 +231,17 @@ export async function processWithdrawalReversal({
       const refCode = `REF-WTH-REV-${crypto.randomInt(100000, 999999)}`;
       await conn.query(
         `INSERT INTO wallet_transactions
-         (wallet_id, type, amount, currency, description, reference)
-         VALUES (?, 'deposit', ?, ?, ?, ?)`,
+         (wallet_id, type, amount, currency, description, reference, balance_before, balance_after, metadata, status)
+         VALUES (?, 'deposit', ?, ?, ?, ?, ?, ?, ?, 'completed')`,
         [
           wallet.id,
           restoreAmount,
           wallet.currency || 'USD',
           `Reversed Withdrawal Restored (${reason}) [Ref: ${reference}]`,
           refCode,
+          balBefore,
+          balAfter,
+          JSON.stringify({ withdrawal_id: withdrawal.id, reason, reference }),
         ]
       );
     }

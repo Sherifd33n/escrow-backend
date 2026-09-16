@@ -3,9 +3,9 @@ import crypto from "crypto";
 
 
 /**
- * Insert a wallet transaction with currency attribution.
+ * Insert a wallet transaction ledger entry with snapshots and metadata.
  */
-async function addWalletTransaction(
+export async function addWalletTransaction(
   conn,
   walletId,
   type,
@@ -13,14 +13,35 @@ async function addWalletTransaction(
   description,
   reference,
   currency = "USD",
+  balanceBefore = null,
+  balanceAfter = null,
+  metadata = null,
+  status = "completed",
 ) {
+  const metaJson = metadata
+    ? typeof metadata === "string"
+      ? metadata
+      : JSON.stringify(metadata)
+    : null;
+
   await conn.query(
     `
       INSERT INTO wallet_transactions
-      (wallet_id, type, amount, currency, description, reference)
-      VALUES (?, ?, ?, ?, ?, ?)
+      (wallet_id, type, amount, currency, description, reference, balance_before, balance_after, metadata, status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `,
-    [walletId, type, amount, currency, description, reference],
+    [
+      walletId,
+      type,
+      amount,
+      currency,
+      description,
+      reference,
+      balanceBefore,
+      balanceAfter,
+      metaJson,
+      status,
+    ],
   );
 }
 
@@ -48,6 +69,9 @@ export async function fundEscrow({ conn, transaction, buyerId, amount }) {
     throw new Error("Insufficient wallet balance.");
   }
 
+  const balBefore = parseFloat(wallet.balance) || 0;
+  const balAfter = balBefore - Number(amount);
+
   await conn.query("UPDATE wallets SET balance = balance - ? WHERE id = ?", [
     amount,
     wallet.id,
@@ -72,11 +96,15 @@ export async function fundEscrow({ conn, transaction, buyerId, amount }) {
     `Escrow hold for "${transaction.title}"`,
     reference,
     txCurrency,
+    balBefore,
+    balAfter,
+    { transaction_id: transaction.id, title: transaction.title },
+    "completed",
   );
 
   return {
     wallet,
-    balance: Number(wallet.balance) - Number(amount),
+    balance: balAfter,
   };
 }
 
@@ -118,6 +146,8 @@ export async function refundEscrow({ conn, transaction, buyerId, amount }) {
   }
 
   const txCurrency = transaction.currency || "USD";
+  const balBefore = parseFloat(wallet.balance) || 0;
+  const balAfter = balBefore + Number(amount);
 
   // 2. Credit buyer's wallet balance
   await conn.query("UPDATE wallets SET balance = balance + ? WHERE id = ?", [
@@ -146,11 +176,15 @@ export async function refundEscrow({ conn, transaction, buyerId, amount }) {
     `Escrow refund for "${transaction.title}"`,
     reference,
     txCurrency,
+    balBefore,
+    balAfter,
+    { transaction_id: transaction.id, title: transaction.title, dispute_refund: true },
+    "completed",
   );
 
   return {
     wallet,
-    balance: Number(wallet.balance) + Number(amount),
+    balance: balAfter,
   };
 }
 
@@ -190,6 +224,9 @@ export async function releaseEscrow({
   const feeAmount = Number((releaseAmount * feeRate).toFixed(2));
   const netPayout = Math.max(0, Number((releaseAmount - feeAmount).toFixed(2)));
 
+  const balBefore = parseFloat(wallet.balance) || 0;
+  const balAfter = balBefore + netPayout;
+
   // Credit net payout to recipient's (seller's) wallet
   await conn.query("UPDATE wallets SET balance = balance + ? WHERE id = ?", [
     netPayout,
@@ -218,6 +255,17 @@ export async function releaseEscrow({
     `Escrow payout for "${transaction.title}" (Net of ${(feeRate * 100).toFixed(1)}% fee)`,
     releaseRef,
     txCurrency,
+    balBefore,
+    balAfter,
+    {
+      transaction_id: transaction.id,
+      title: transaction.title,
+      gross_amount: releaseAmount,
+      fee_amount: feeAmount,
+      fee_rate: feeRate,
+      net_payout: netPayout,
+    },
+    "completed",
   );
 
   // Record escrow fee booking ledger entry if fee > 0
@@ -231,12 +279,21 @@ export async function releaseEscrow({
       `Escrow platform fee (${(feeRate * 100).toFixed(1)}%) for "${transaction.title}"`,
       feeRef,
       txCurrency,
+      balBefore,
+      balBefore,
+      {
+        transaction_id: transaction.id,
+        title: transaction.title,
+        fee_rate: feeRate,
+        fee_amount: feeAmount,
+      },
+      "completed",
     );
   }
 
   return {
     wallet,
-    balance: Number(wallet.balance) + netPayout,
+    balance: balAfter,
     feeAmount,
     netPayout,
   };

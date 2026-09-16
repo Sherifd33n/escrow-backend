@@ -174,10 +174,12 @@ export async function getUserEntitlements(userId) {
             if (nextCycle === "annual") nextEndsAt.setFullYear(nextEndsAt.getFullYear() + 1);
             else nextEndsAt.setMonth(nextEndsAt.getMonth() + 1);
 
+            const balanceBefore = parseFloat(wallet.balance);
+            const balanceAfter = balanceBefore - costUSD;
             await db.query("UPDATE wallets SET balance = balance - ? WHERE id = ?", [costUSD, wallet.id]);
             await db.query(
-              `INSERT INTO wallet_transactions (wallet_id, type, amount, currency, description, reference) VALUES (?, 'subscription', ?, 'USD', ?, ?)`,
-              [wallet.id, costUSD, `Auto-renewal: ${nextPlanConfig.name} Plan (${nextCycle})`, reference]
+              `INSERT INTO wallet_transactions (wallet_id, type, amount, currency, description, reference, balance_before, balance_after, metadata, status) VALUES (?, 'subscription', ?, 'USD', ?, ?, ?, ?, ?, 'completed')`,
+              [wallet.id, costUSD, `Auto-renewal: ${nextPlanConfig.name} Plan (${nextCycle})`, reference, balanceBefore, balanceAfter, JSON.stringify({ plan_id: nextPlanId, billing_cycle: nextCycle, auto_renewal: true, trigger: 'entitlement_check' })]
             );
             await db.query(
               `INSERT INTO payments (user_id, reference, amount, amount_kobo, currency, exchange_rate, purpose, provider, status, metadata)
