@@ -7,7 +7,8 @@ import db from "../config/db.js";
 
 const router = express.Router();
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const UPLOADS_DIR = path.resolve(path.join(__dirname, "../../uploads"));
+const ROOT_UPLOADS_DIR = path.resolve(path.join(__dirname, "../../../uploads"));
+const BACKEND_UPLOADS_DIR = path.resolve(path.join(__dirname, "../../uploads"));
 
 // Protect all files with authentication
 router.use(authMiddleware);
@@ -25,29 +26,34 @@ router.use(async (req, res, next) => {
     const safeBasename = parts.length > 0 ? path.basename(parts[parts.length - 1]) : "";
     const subfolder = parts.length > 1 ? parts[0] : "";
 
-    const allowedRoot = path.resolve(UPLOADS_DIR);
-    let targetPath = parts.length > 0
-      ? path.resolve(path.join(UPLOADS_DIR, ...parts))
-      : allowedRoot;
+    const candidates = [
+      parts.length > 0 ? path.resolve(path.join(ROOT_UPLOADS_DIR, ...parts)) : null,
+      safeBasename ? path.resolve(path.join(ROOT_UPLOADS_DIR, "evidence", safeBasename)) : null,
+      safeBasename ? path.resolve(path.join(ROOT_UPLOADS_DIR, "kyc", safeBasename)) : null,
+      safeBasename ? path.resolve(path.join(ROOT_UPLOADS_DIR, safeBasename)) : null,
+      parts.length > 0 ? path.resolve(path.join(BACKEND_UPLOADS_DIR, ...parts)) : null,
+      safeBasename ? path.resolve(path.join(BACKEND_UPLOADS_DIR, "evidence", safeBasename)) : null,
+      safeBasename ? path.resolve(path.join(BACKEND_UPLOADS_DIR, "kyc", safeBasename)) : null,
+      safeBasename ? path.resolve(path.join(BACKEND_UPLOADS_DIR, safeBasename)) : null,
+    ].filter(Boolean);
 
-    // Check if file exists directly or in common subfolders
-    if (!fs.existsSync(targetPath) && safeBasename) {
-      const evidenceCandidate = path.resolve(path.join(UPLOADS_DIR, "evidence", safeBasename));
-      const kycCandidate = path.resolve(path.join(UPLOADS_DIR, "kyc", safeBasename));
-      if (fs.existsSync(evidenceCandidate)) {
-        targetPath = evidenceCandidate;
-      } else if (fs.existsSync(kycCandidate)) {
-        targetPath = kycCandidate;
+    let targetPath = null;
+    for (const cand of candidates) {
+      if (fs.existsSync(cand) && !fs.statSync(cand).isDirectory()) {
+        targetPath = cand;
+        break;
       }
     }
 
-    // Root jail verification
-    if (!targetPath.startsWith(allowedRoot)) {
-      return res.status(403).json({ error: "Access denied." });
+    if (!targetPath) {
+      return res.status(404).json({ error: "File not found." });
     }
 
-    if (!fs.existsSync(targetPath) || fs.statSync(targetPath).isDirectory()) {
-      return res.status(404).json({ error: "File not found." });
+    // Root jail verification
+    const withinRootUploads = targetPath.startsWith(ROOT_UPLOADS_DIR);
+    const withinBackendUploads = targetPath.startsWith(BACKEND_UPLOADS_DIR);
+    if (!withinRootUploads && !withinBackendUploads) {
+      return res.status(403).json({ error: "Access denied." });
     }
 
     const userId = req.user.id;

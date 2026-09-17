@@ -37,7 +37,9 @@ import { processWebsite } from "./processors/websiteProcessor.js";
 import { processUnsupported } from "./processors/unsupportedProcessor.js";
 
 const __dirname_pipe = path.dirname(fileURLToPath(import.meta.url));
-const UPLOADS_DIR = path.resolve(path.join(__dirname_pipe, "../../../uploads"));
+const ROOT_UPLOADS_DIR = path.resolve(path.join(__dirname_pipe, "../../../../uploads"));
+const BACKEND_UPLOADS_DIR = path.resolve(path.join(__dirname_pipe, "../../../uploads"));
+const UPLOADS_DIR = ROOT_UPLOADS_DIR;
 
 /**
  * Normalizes raw evidence entries from submission_data JSON into canonical objects.
@@ -253,33 +255,33 @@ export async function processSingleEvidence({ transactionId, milestoneId, submis
   // 1. Check if evidence refers to a local upload path
   if (rawItem.url) {
     const normUrl = String(rawItem.url).replace(/\\/g, "/");
-    let candidatePath = null;
-
     const cleanUrlPart = normUrl.split("?")[0].split("#")[0];
     const safeBasename = path.basename(decodeURIComponent(cleanUrlPart));
 
-    if (normUrl.includes("uploads/evidence/")) {
-      candidatePath = path.join(UPLOADS_DIR, "evidence", safeBasename);
-    } else if (normUrl.includes("uploads/kyc/")) {
-      candidatePath = path.join(UPLOADS_DIR, "kyc", safeBasename);
-    } else if (normUrl.includes("uploads/")) {
-      candidatePath = path.join(UPLOADS_DIR, safeBasename);
-    }
+    const checkDirs = [ROOT_UPLOADS_DIR, BACKEND_UPLOADS_DIR];
+    let candidatePath = null;
 
-    // Fallback: check if the file exists in uploads/evidence/ or uploads/
-    if (candidatePath && !fs.existsSync(candidatePath) && safeBasename) {
-      const evPath = path.join(UPLOADS_DIR, "evidence", safeBasename);
-      if (fs.existsSync(evPath)) {
-        candidatePath = evPath;
+    for (const dir of checkDirs) {
+      if (normUrl.includes("uploads/evidence/")) {
+        const p = path.join(dir, "evidence", safeBasename);
+        if (fs.existsSync(p)) { candidatePath = p; break; }
+      } else if (normUrl.includes("uploads/kyc/")) {
+        const p = path.join(dir, "kyc", safeBasename);
+        if (fs.existsSync(p)) { candidatePath = p; break; }
+      } else if (normUrl.includes("uploads/")) {
+        const p = path.join(dir, safeBasename);
+        if (fs.existsSync(p)) { candidatePath = p; break; }
       }
+      const directCandidate = path.join(dir, "evidence", safeBasename);
+      if (fs.existsSync(directCandidate)) { candidatePath = directCandidate; break; }
     }
 
     if (candidatePath) {
       const resolvedPath = path.resolve(candidatePath);
-      const allowedRoot = path.resolve(UPLOADS_DIR);
+      const isWithinRoot = resolvedPath.startsWith(ROOT_UPLOADS_DIR);
+      const isWithinBackend = resolvedPath.startsWith(BACKEND_UPLOADS_DIR);
 
-      // Root jail check: candidate path must reside strictly within UPLOADS_DIR
-      if (resolvedPath.startsWith(allowedRoot) && fs.existsSync(resolvedPath)) {
+      if ((isWithinRoot || isWithinBackend) && fs.existsSync(resolvedPath)) {
         storagePath = resolvedPath;
         const valRes = await validateEvidenceFile({
           filePath: storagePath,
