@@ -4,6 +4,7 @@ node_modules
 .env.example
 uploads
 logs
+src/config/ca.pem
 
 coverage
 dist

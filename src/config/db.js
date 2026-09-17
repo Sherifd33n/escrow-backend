@@ -6,12 +6,42 @@ import dns from "dns";
 import dotenv from "dotenv";
 
 dotenv.config();
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
 dotenv.config({ path: path.resolve(__dirname, "../../.env") });
+
+const databaseName = process.env.DB_NAME || "escrow_db";
+
+const isAiven = process.env.DB_HOST?.includes("aivencloud.com");
+
+const caPath = path.join(__dirname, "ca.pem");
+
+let aivenCa;
+
+if (isAiven) {
+  if (process.env.AIVEN_CA_CERT) {
+    aivenCa = process.env.AIVEN_CA_CERT;
+  } else if (fs.existsSync(caPath)) {
+    aivenCa = fs.readFileSync(caPath);
+  } else {
+    throw new Error(
+      `Aiven database is configured but no CA certificate was found. Set AIVEN_CA_CERT or provide ${caPath}.`,
+    );
+  }
+}
+
+const sslConfig = isAiven
+  ? {
+      ca: aivenCa,
+      rejectUnauthorized: true,
+      servername: process.env.DB_HOST,
+    }
+  : undefined;
 
 const dbConfig = {
   host: process.env.DB_HOST || "localhost",
-  port: parseInt(process.env.DB_PORT || "3306"),
+  port: parseInt(process.env.DB_PORT || "3306", 10),
   user: process.env.DB_USER || "root",
   password: process.env.DB_PASSWORD || "",
   timezone: "Z",
@@ -19,30 +49,65 @@ const dbConfig = {
   enableKeepAlive: true,
   keepAliveInitialDelay: 10000,
   connectTimeout: 30000,
+
+  ...(sslConfig ? { ssl: sslConfig } : {}),
 };
 
 let pool;
 
 async function resolveHost(host) {
-  if (!host || host === "localhost" || /^(\d{1,3}\.){3}\d{1,3}$/.test(host)) {
+  if (!host || host === "localhost" || /^(?:\d{1,3}\.){3}\d{1,3}$/.test(host)) {
+    return host;
+  }
+
+  // Aiven requires the hostname for TLS certificate verification,
+  // but we can use public DNS to resolve it to an IP when the
+  // system DNS resolver is failing.
+  if (isAiven) {
+    try {
+      const resolver = new dns.promises.Resolver();
+      resolver.setServers(["8.8.8.8", "1.1.1.1"]);
+
+      const addresses = await resolver.resolve4(host);
+
+      if (addresses && addresses.length > 0) {
+        console.log(
+          `Resolved Aiven host ${host} to ${addresses[0]} via public DNS.`,
+        );
+        return addresses[0];
+      }
+    } catch (err) {
+      console.warn(
+        `Public DNS could not resolve Aiven host ${host}:`,
+        err.message,
+      );
+    }
+
     return host;
   }
   try {
     const res = await dns.promises.lookup(host, { family: 4 });
     return res.address;
   } catch (err) {
-    console.warn(`System DNS lookup failed for ${host} (${err.code || err.message}). Trying public DNS fallback (8.8.8.8, 1.1.1.1)...`);
+    console.warn(
+      `System DNS lookup failed for ${host} (${err.code || err.message}). Trying public DNS fallback (8.8.8.8, 1.1.1.1)...`,
+    );
+
     try {
       const resolver = new dns.promises.Resolver();
       resolver.setServers(["8.8.8.8", "1.1.1.1"]);
       const addresses = await resolver.resolve4(host);
+
       if (addresses && addresses.length > 0) {
-        console.log(`Successfully resolved ${host} to ${addresses[0]} via public DNS.`);
+        console.log(
+          `Successfully resolved ${host} to ${addresses[0]} via public DNS.`,
+        );
         return addresses[0];
       }
     } catch (fallbackErr) {
       console.error(`Public DNS fallback failed for ${host}:`, fallbackErr);
     }
+
     return host;
   }
 }
@@ -56,14 +121,20 @@ export async function initDatabase() {
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
         activeHost = await resolveHost(dbConfig.host);
+
         connection = await mysql.createConnection({
           ...dbConfig,
           host: activeHost,
         });
+
         break;
       } catch (err) {
         lastError = err;
-        console.warn(`Database connection attempt ${attempt}/3 failed: ${err.message}`);
+
+        console.warn(
+          `Database connection attempt ${attempt}/3 failed: ${err.message}`,
+        );
+
         if (attempt < 3) {
           await new Promise((r) => setTimeout(r, 2000));
         }
@@ -76,37 +147,49 @@ export async function initDatabase() {
 
     console.log("Connected to MySQL server.");
 
-    // Create database if not exists
+    /*
+     * Create database if it does not already exist.
+     */
     await connection.query(
-      `CREATE DATABASE IF NOT EXISTS \`${process.env.DB_NAME || "escrow_db"}\` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;`,
+      `CREATE DATABASE IF NOT EXISTS \`${databaseName}\` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;`,
     );
-    console.log(
-      `Database \`${process.env.DB_NAME || "escrow_db"}\` checked/created.`,
-    );
+
+    console.log(`Database \`${databaseName}\` checked/created.`);
+
     await connection.end();
 
-    // Now initialize pool with the database specified
+    /*
+     * Initialize the application pool using the target database.
+     */
     pool = mysql.createPool({
       ...dbConfig,
       host: activeHost,
-      database: process.env.DB_NAME || "escrow_db",
+      database: databaseName,
       waitForConnections: true,
       connectionLimit: 10,
       queueLimit: 0,
     });
 
-    // Run schema.sql to create tables if they don't exist
+    /*
+     * Run schema.sql to create/verify tables.
+     */
     const schemaPath = path.join(__dirname, "schema.sql");
+
     if (fs.existsSync(schemaPath)) {
       const schemaSql = fs.readFileSync(schemaPath, "utf8");
+
       try {
         await query(schemaSql);
+
         console.log("Database schema successfully verified/initialized.");
 
-        // Run migration to add columns if they are missing
+        /*
+         * Run existing application migrations.
+         */
         await runMigrations();
       } catch (schemaErr) {
         console.warn("Schema initialization warning:", schemaErr.message);
+
         await runMigrations();
       }
     } else {
@@ -114,11 +197,14 @@ export async function initDatabase() {
     }
   } catch (error) {
     console.error("Database initialization failed:", error);
+
     process.exit(1);
   }
 }
 
-async function runMigrations(conn = { query: async (s, p) => [await query(s, p)] }) {
+async function runMigrations(
+  conn = { query: async (s, p) => [await query(s, p)] },
+) {
   // Check and rename old columns if they exist
   try {
     const [discoveryCols] = await conn.query(
@@ -445,24 +531,40 @@ WHERE is_verified IS NULL;
   // TRANSACTIONS TABLE FEE COLUMNS MIGRATION
   // ----------------------------------------------------
   try {
-    const [feeRateCols] = await conn.query("SHOW COLUMNS FROM transactions LIKE 'escrow_fee_rate'");
+    const [feeRateCols] = await conn.query(
+      "SHOW COLUMNS FROM transactions LIKE 'escrow_fee_rate'",
+    );
     if (feeRateCols.length === 0) {
-      await conn.query("ALTER TABLE transactions ADD COLUMN `escrow_fee_rate` DECIMAL(5, 4) NOT NULL DEFAULT 0.0350");
+      await conn.query(
+        "ALTER TABLE transactions ADD COLUMN `escrow_fee_rate` DECIMAL(5, 4) NOT NULL DEFAULT 0.0350",
+      );
       console.log("Migration: Added transactions.escrow_fee_rate");
     }
-    const [feeAmountCols] = await conn.query("SHOW COLUMNS FROM transactions LIKE 'escrow_fee_amount'");
+    const [feeAmountCols] = await conn.query(
+      "SHOW COLUMNS FROM transactions LIKE 'escrow_fee_amount'",
+    );
     if (feeAmountCols.length === 0) {
-      await conn.query("ALTER TABLE transactions ADD COLUMN `escrow_fee_amount` DECIMAL(15, 2) NOT NULL DEFAULT 0.00");
+      await conn.query(
+        "ALTER TABLE transactions ADD COLUMN `escrow_fee_amount` DECIMAL(15, 2) NOT NULL DEFAULT 0.00",
+      );
       console.log("Migration: Added transactions.escrow_fee_amount");
     }
-    const [ebCols] = await conn.query("SHOW COLUMNS FROM transactions LIKE 'escrow_balance'");
+    const [ebCols] = await conn.query(
+      "SHOW COLUMNS FROM transactions LIKE 'escrow_balance'",
+    );
     if (ebCols.length === 0) {
-      await conn.query("ALTER TABLE transactions ADD COLUMN `escrow_balance` DECIMAL(15, 2) NOT NULL DEFAULT 0.00");
+      await conn.query(
+        "ALTER TABLE transactions ADD COLUMN `escrow_balance` DECIMAL(15, 2) NOT NULL DEFAULT 0.00",
+      );
       console.log("Migration: Added transactions.escrow_balance");
     }
-    const [raCols] = await conn.query("SHOW COLUMNS FROM transactions LIKE 'released_amount'");
+    const [raCols] = await conn.query(
+      "SHOW COLUMNS FROM transactions LIKE 'released_amount'",
+    );
     if (raCols.length === 0) {
-      await conn.query("ALTER TABLE transactions ADD COLUMN `released_amount` DECIMAL(15, 2) NOT NULL DEFAULT 0.00");
+      await conn.query(
+        "ALTER TABLE transactions ADD COLUMN `released_amount` DECIMAL(15, 2) NOT NULL DEFAULT 0.00",
+      );
       console.log("Migration: Added transactions.released_amount");
     }
   } catch (err) {
@@ -474,14 +576,26 @@ WHERE is_verified IS NULL;
   // ----------------------------------------------------
   try {
     // Make id_type, id_number, id_file, phone nullable to support business-only verification
-    await conn.query("ALTER TABLE kyc_submissions MODIFY COLUMN phone VARCHAR(50) DEFAULT NULL");
-    await conn.query("ALTER TABLE kyc_submissions MODIFY COLUMN id_type VARCHAR(50) DEFAULT NULL");
-    await conn.query("ALTER TABLE kyc_submissions MODIFY COLUMN id_number VARCHAR(100) DEFAULT NULL");
-    await conn.query("ALTER TABLE kyc_submissions MODIFY COLUMN id_file VARCHAR(255) DEFAULT NULL");
+    await conn.query(
+      "ALTER TABLE kyc_submissions MODIFY COLUMN phone VARCHAR(50) DEFAULT NULL",
+    );
+    await conn.query(
+      "ALTER TABLE kyc_submissions MODIFY COLUMN id_type VARCHAR(50) DEFAULT NULL",
+    );
+    await conn.query(
+      "ALTER TABLE kyc_submissions MODIFY COLUMN id_number VARCHAR(100) DEFAULT NULL",
+    );
+    await conn.query(
+      "ALTER TABLE kyc_submissions MODIFY COLUMN id_file VARCHAR(255) DEFAULT NULL",
+    );
 
-    const [typeCols] = await conn.query("SHOW COLUMNS FROM kyc_submissions LIKE 'submission_type'");
+    const [typeCols] = await conn.query(
+      "SHOW COLUMNS FROM kyc_submissions LIKE 'submission_type'",
+    );
     if (typeCols.length === 0) {
-      await conn.query("ALTER TABLE kyc_submissions ADD COLUMN `submission_type` ENUM('govt_id', 'business') NOT NULL DEFAULT 'govt_id'");
+      await conn.query(
+        "ALTER TABLE kyc_submissions ADD COLUMN `submission_type` ENUM('govt_id', 'business') NOT NULL DEFAULT 'govt_id'",
+      );
       console.log("Migration: Added kyc_submissions.submission_type");
     }
   } catch (err) {
@@ -503,20 +617,28 @@ WHERE is_verified IS NULL;
   const subColumns = [
     { name: "payment_provider", definition: "VARCHAR(50) DEFAULT NULL" },
     { name: "provider_customer_id", definition: "VARCHAR(255) DEFAULT NULL" },
-    { name: "provider_subscription_id", definition: "VARCHAR(255) DEFAULT NULL" },
+    {
+      name: "provider_subscription_id",
+      definition: "VARCHAR(255) DEFAULT NULL",
+    },
     { name: "provider_reference_id", definition: "VARCHAR(255) DEFAULT NULL" },
     { name: "auto_renew", definition: "TINYINT(1) NOT NULL DEFAULT 1" },
     { name: "cancelled_at", definition: "TIMESTAMP NULL DEFAULT NULL" },
     { name: "metadata", definition: "JSON DEFAULT NULL" },
     { name: "pending_plan_id", definition: "VARCHAR(50) DEFAULT NULL" },
-    { name: "pending_billing_cycle", definition: "VARCHAR(50) DEFAULT NULL" }
+    { name: "pending_billing_cycle", definition: "VARCHAR(50) DEFAULT NULL" },
   ];
 
   for (const col of subColumns) {
     try {
-      const [rows] = await conn.query("SHOW COLUMNS FROM subscriptions LIKE ?", [col.name]);
+      const [rows] = await conn.query(
+        "SHOW COLUMNS FROM subscriptions LIKE ?",
+        [col.name],
+      );
       if (rows.length === 0) {
-        await conn.query(`ALTER TABLE subscriptions ADD COLUMN \`${col.name}\` ${col.definition}`);
+        await conn.query(
+          `ALTER TABLE subscriptions ADD COLUMN \`${col.name}\` ${col.definition}`,
+        );
         console.log(`Migration: Added subscriptions.${col.name}`);
       }
     } catch (err) {
@@ -546,7 +668,10 @@ WHERE is_verified IS NULL;
     `);
     console.log("Migration: subscriptions_history table checked/created.");
   } catch (err) {
-    console.error("Migration failed to create subscriptions_history table:", err);
+    console.error(
+      "Migration failed to create subscriptions_history table:",
+      err,
+    );
   }
 
   // Clean up any unverified subscription records auto-inserted during signup prior to the security fix
@@ -557,7 +682,10 @@ WHERE is_verified IS NULL;
       WHERE provider_reference_id IS NULL AND status = 'active'
     `);
   } catch (err) {
-    console.error("Migration failed to clean up unverified subscriptions:", err);
+    console.error(
+      "Migration failed to clean up unverified subscriptions:",
+      err,
+    );
   }
 
   // Update wallet_transactions.type ENUM to include 'subscription', 'escrow_fee', and 'adjustment'
@@ -567,14 +695,21 @@ WHERE is_verified IS NULL;
       MODIFY COLUMN type ENUM('deposit', 'withdrawal', 'escrow_hold', 'escrow_release', 'escrow_refund', 'subscription', 'escrow_fee', 'adjustment') NOT NULL
     `);
   } catch (err) {
-    console.error("Migration failed to update wallet_transactions.type ENUM:", err);
+    console.error(
+      "Migration failed to update wallet_transactions.type ENUM:",
+      err,
+    );
   }
 
   // Ensure wallet_transactions has currency column
   try {
-    const [wtCurrencyCols] = await conn.query("SHOW COLUMNS FROM wallet_transactions LIKE 'currency'");
+    const [wtCurrencyCols] = await conn.query(
+      "SHOW COLUMNS FROM wallet_transactions LIKE 'currency'",
+    );
     if (wtCurrencyCols.length === 0) {
-      await conn.query("ALTER TABLE wallet_transactions ADD COLUMN `currency` VARCHAR(3) NOT NULL DEFAULT 'USD'");
+      await conn.query(
+        "ALTER TABLE wallet_transactions ADD COLUMN `currency` VARCHAR(3) NOT NULL DEFAULT 'USD'",
+      );
       console.log("Migration: Added wallet_transactions.currency column.");
     }
   } catch (err) {
@@ -583,31 +718,51 @@ WHERE is_verified IS NULL;
 
   // Ensure wallet_transactions has balance_before column
   try {
-    const [wtBbCols] = await conn.query("SHOW COLUMNS FROM wallet_transactions LIKE 'balance_before'");
+    const [wtBbCols] = await conn.query(
+      "SHOW COLUMNS FROM wallet_transactions LIKE 'balance_before'",
+    );
     if (wtBbCols.length === 0) {
-      await conn.query("ALTER TABLE wallet_transactions ADD COLUMN `balance_before` DECIMAL(15,2) NULL DEFAULT NULL");
-      console.log("Migration: Added wallet_transactions.balance_before column.");
+      await conn.query(
+        "ALTER TABLE wallet_transactions ADD COLUMN `balance_before` DECIMAL(15,2) NULL DEFAULT NULL",
+      );
+      console.log(
+        "Migration: Added wallet_transactions.balance_before column.",
+      );
     }
   } catch (err) {
-    console.error("Migration failed to add wallet_transactions.balance_before:", err);
+    console.error(
+      "Migration failed to add wallet_transactions.balance_before:",
+      err,
+    );
   }
 
   // Ensure wallet_transactions has balance_after column
   try {
-    const [wtBaCols] = await conn.query("SHOW COLUMNS FROM wallet_transactions LIKE 'balance_after'");
+    const [wtBaCols] = await conn.query(
+      "SHOW COLUMNS FROM wallet_transactions LIKE 'balance_after'",
+    );
     if (wtBaCols.length === 0) {
-      await conn.query("ALTER TABLE wallet_transactions ADD COLUMN `balance_after` DECIMAL(15,2) NULL DEFAULT NULL");
+      await conn.query(
+        "ALTER TABLE wallet_transactions ADD COLUMN `balance_after` DECIMAL(15,2) NULL DEFAULT NULL",
+      );
       console.log("Migration: Added wallet_transactions.balance_after column.");
     }
   } catch (err) {
-    console.error("Migration failed to add wallet_transactions.balance_after:", err);
+    console.error(
+      "Migration failed to add wallet_transactions.balance_after:",
+      err,
+    );
   }
 
   // Ensure wallet_transactions has metadata column
   try {
-    const [wtMetaCols] = await conn.query("SHOW COLUMNS FROM wallet_transactions LIKE 'metadata'");
+    const [wtMetaCols] = await conn.query(
+      "SHOW COLUMNS FROM wallet_transactions LIKE 'metadata'",
+    );
     if (wtMetaCols.length === 0) {
-      await conn.query("ALTER TABLE wallet_transactions ADD COLUMN `metadata` JSON NULL DEFAULT NULL");
+      await conn.query(
+        "ALTER TABLE wallet_transactions ADD COLUMN `metadata` JSON NULL DEFAULT NULL",
+      );
       console.log("Migration: Added wallet_transactions.metadata column.");
     }
   } catch (err) {
@@ -616,9 +771,13 @@ WHERE is_verified IS NULL;
 
   // Ensure wallet_transactions has status column
   try {
-    const [wtStatusCols] = await conn.query("SHOW COLUMNS FROM wallet_transactions LIKE 'status'");
+    const [wtStatusCols] = await conn.query(
+      "SHOW COLUMNS FROM wallet_transactions LIKE 'status'",
+    );
     if (wtStatusCols.length === 0) {
-      await conn.query("ALTER TABLE wallet_transactions ADD COLUMN `status` ENUM('completed', 'pending', 'failed', 'reversed') NOT NULL DEFAULT 'completed'");
+      await conn.query(
+        "ALTER TABLE wallet_transactions ADD COLUMN `status` ENUM('completed', 'pending', 'failed', 'reversed') NOT NULL DEFAULT 'completed'",
+      );
       console.log("Migration: Added wallet_transactions.status column.");
     }
   } catch (err) {
@@ -627,9 +786,13 @@ WHERE is_verified IS NULL;
 
   // Ensure index on wallet_transactions(wallet_id, created_at)
   try {
-    const [wtIdx] = await conn.query("SHOW INDEX FROM wallet_transactions WHERE Key_name = 'idx_wt_wallet_created'");
+    const [wtIdx] = await conn.query(
+      "SHOW INDEX FROM wallet_transactions WHERE Key_name = 'idx_wt_wallet_created'",
+    );
     if (wtIdx.length === 0) {
-      await conn.query("ALTER TABLE wallet_transactions ADD INDEX `idx_wt_wallet_created` (`wallet_id`, `created_at`)");
+      await conn.query(
+        "ALTER TABLE wallet_transactions ADD INDEX `idx_wt_wallet_created` (`wallet_id`, `created_at`)",
+      );
       console.log("Migration: Added idx_wt_wallet_created index.");
     }
   } catch (err) {
@@ -661,9 +824,15 @@ WHERE is_verified IS NULL;
   // DISPUTES TABLE LONGTEXT MIGRATION
   // ----------------------------------------------------
   try {
-    await conn.query("ALTER TABLE disputes MODIFY COLUMN evidence LONGTEXT DEFAULT NULL");
-    await conn.query("ALTER TABLE disputes MODIFY COLUMN reason LONGTEXT NOT NULL");
-    console.log("Migration: Updated disputes.evidence and disputes.reason to LONGTEXT.");
+    await conn.query(
+      "ALTER TABLE disputes MODIFY COLUMN evidence LONGTEXT DEFAULT NULL",
+    );
+    await conn.query(
+      "ALTER TABLE disputes MODIFY COLUMN reason LONGTEXT NOT NULL",
+    );
+    console.log(
+      "Migration: Updated disputes.evidence and disputes.reason to LONGTEXT.",
+    );
   } catch (err) {
     console.error("Migration failed for disputes LONGTEXT columns:", err);
   }
@@ -677,14 +846,21 @@ WHERE is_verified IS NULL;
     { name: "agreed_duration", definition: "VARCHAR(100) DEFAULT NULL" },
     { name: "agreed_deadline", definition: "TIMESTAMP NULL DEFAULT NULL" },
     { name: "deadline_notified_at", definition: "TIMESTAMP NULL DEFAULT NULL" },
-    { name: "revision_policy", definition: "VARCHAR(255) DEFAULT '2 rounds of minor revisions'" }
+    {
+      name: "revision_policy",
+      definition: "VARCHAR(255) DEFAULT '2 rounds of minor revisions'",
+    },
   ];
 
   for (const col of txScopeColumns) {
     try {
-      const [rows] = await conn.query("SHOW COLUMNS FROM transactions LIKE ?", [col.name]);
+      const [rows] = await conn.query("SHOW COLUMNS FROM transactions LIKE ?", [
+        col.name,
+      ]);
       if (rows.length === 0) {
-        await conn.query(`ALTER TABLE transactions ADD COLUMN \`${col.name}\` ${col.definition}`);
+        await conn.query(
+          `ALTER TABLE transactions ADD COLUMN \`${col.name}\` ${col.definition}`,
+        );
         console.log(`Migration: Added transactions.${col.name}`);
       }
     } catch (err) {
@@ -699,14 +875,18 @@ WHERE is_verified IS NULL;
     { name: "description", definition: "TEXT DEFAULT NULL" },
     { name: "ai_suggested_timeline", definition: "VARCHAR(100) DEFAULT NULL" },
     { name: "start_date", definition: "TIMESTAMP NULL DEFAULT NULL" },
-    { name: "due_date", definition: "TIMESTAMP NULL DEFAULT NULL" }
+    { name: "due_date", definition: "TIMESTAMP NULL DEFAULT NULL" },
   ];
 
   for (const col of milestoneColumns) {
     try {
-      const [rows] = await conn.query("SHOW COLUMNS FROM milestones LIKE ?", [col.name]);
+      const [rows] = await conn.query("SHOW COLUMNS FROM milestones LIKE ?", [
+        col.name,
+      ]);
       if (rows.length === 0) {
-        await conn.query(`ALTER TABLE milestones ADD COLUMN \`${col.name}\` ${col.definition}`);
+        await conn.query(
+          `ALTER TABLE milestones ADD COLUMN \`${col.name}\` ${col.definition}`,
+        );
         console.log(`Migration: Added milestones.${col.name}`);
       }
     } catch (err) {
@@ -764,7 +944,10 @@ WHERE is_verified IS NULL;
     `);
     console.log("Migration: milestone_submissions table checked/created.");
   } catch (err) {
-    console.error("Migration failed to create milestone_submissions table:", err);
+    console.error(
+      "Migration failed to create milestone_submissions table:",
+      err,
+    );
   }
 
   // ----------------------------------------------------
@@ -772,21 +955,28 @@ WHERE is_verified IS NULL;
   // ----------------------------------------------------
   const subDataColumns = [
     { name: "category", definition: "VARCHAR(50) DEFAULT NULL" },
-    { name: "submission_data", definition: "JSON DEFAULT NULL" }
+    { name: "submission_data", definition: "JSON DEFAULT NULL" },
   ];
 
   for (const col of subDataColumns) {
     try {
-      const [rows] = await conn.query("SHOW COLUMNS FROM milestone_submissions LIKE ?", [col.name]);
+      const [rows] = await conn.query(
+        "SHOW COLUMNS FROM milestone_submissions LIKE ?",
+        [col.name],
+      );
       if (rows.length === 0) {
-        await conn.query(`ALTER TABLE milestone_submissions ADD COLUMN \`${col.name}\` ${col.definition}`);
+        await conn.query(
+          `ALTER TABLE milestone_submissions ADD COLUMN \`${col.name}\` ${col.definition}`,
+        );
         console.log(`Migration: Added milestone_submissions.${col.name}`);
       }
     } catch (err) {
-      console.error(`Migration failed for milestone_submissions.${col.name}`, err);
+      console.error(
+        `Migration failed for milestone_submissions.${col.name}`,
+        err,
+      );
     }
   }
-
 
   // ----------------------------------------------------
   // CREATE revision_requests TABLE
@@ -904,7 +1094,9 @@ WHERE is_verified IS NULL;
         FOREIGN KEY (\`evidence_item_id\`) REFERENCES \`evidence_items\` (\`id\`) ON DELETE CASCADE
       ) ENGINE=InnoDB;
     `);
-    console.log("Migration: evidence_processing_results table checked/created.");
+    console.log(
+      "Migration: evidence_processing_results table checked/created.",
+    );
 
     await conn.query(`
       CREATE TABLE IF NOT EXISTS \`evidence_findings\` (
@@ -972,21 +1164,34 @@ WHERE is_verified IS NULL;
 
     const aiAuditColumns = [
       { name: "release_eligible", definition: "TINYINT(1) NOT NULL DEFAULT 0" },
-      { name: "release_decision", definition: "VARCHAR(50) NOT NULL DEFAULT 'blocked'" },
+      {
+        name: "release_decision",
+        definition: "VARCHAR(50) NOT NULL DEFAULT 'blocked'",
+      },
       { name: "release_blockers_json", definition: "JSON DEFAULT NULL" },
-      { name: "audit_version", definition: "VARCHAR(20) NOT NULL DEFAULT '3.0'" },
+      {
+        name: "audit_version",
+        definition: "VARCHAR(20) NOT NULL DEFAULT '3.0'",
+      },
       { name: "snapshot_json", definition: "JSON DEFAULT NULL" },
     ];
 
     for (const col of aiAuditColumns) {
       try {
-        const [rows] = await conn.query("SHOW COLUMNS FROM ai_audits LIKE ?", [col.name]);
+        const [rows] = await conn.query("SHOW COLUMNS FROM ai_audits LIKE ?", [
+          col.name,
+        ]);
         if (rows.length === 0) {
-          await conn.query(`ALTER TABLE ai_audits ADD COLUMN \`${col.name}\` ${col.definition}`);
+          await conn.query(
+            `ALTER TABLE ai_audits ADD COLUMN \`${col.name}\` ${col.definition}`,
+          );
           console.log(`Migration: Added ai_audits.${col.name}`);
         }
       } catch (colErr) {
-        console.error(`Migration failed for ai_audits.${col.name}:`, colErr.message);
+        console.error(
+          `Migration failed for ai_audits.${col.name}:`,
+          colErr.message,
+        );
       }
     }
     // ----------------------------------------------------
@@ -1074,7 +1279,10 @@ WHERE is_verified IS NULL;
     `);
     console.log("Migration: ai_dispute_analyses table checked/created.");
   } catch (err) {
-    console.error("Migration failed to create Stage 1/2/3/4/Dispute tables:", err);
+    console.error(
+      "Migration failed to create Stage 1/2/3/4/Dispute tables:",
+      err,
+    );
   }
 
   // ----------------------------------------------------
@@ -1172,7 +1380,6 @@ WHERE is_verified IS NULL;
   }
 }
 
-
 export async function query(sql, params) {
   if (!pool) {
     throw new Error("Database pool not initialized. Call initDatabase first.");
@@ -1195,7 +1402,9 @@ export async function query(sql, params) {
     } catch (err) {
       lastError = err;
       if (RETRYABLE_CODES.has(err.code) && attempt < 3) {
-        console.warn(`[DB] Query failed with ${err.code}, retrying (${attempt}/3)...`);
+        console.warn(
+          `[DB] Query failed with ${err.code}, retrying (${attempt}/3)...`,
+        );
         await new Promise((r) => setTimeout(r, 1000 * attempt));
         continue;
       }
