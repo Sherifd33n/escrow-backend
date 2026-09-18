@@ -872,6 +872,9 @@ WHERE is_verified IS NULL;
   // MILESTONES EXTENSION MIGRATIONS
   // ----------------------------------------------------
   const milestoneColumns = [
+    { name: "expected_project_progress", definition: "INT DEFAULT NULL" },
+    { name: "deliverables", definition: "JSON DEFAULT NULL" },
+    { name: "acceptance_criteria", definition: "JSON DEFAULT NULL" },
     { name: "description", definition: "TEXT DEFAULT NULL" },
     { name: "ai_suggested_timeline", definition: "VARCHAR(100) DEFAULT NULL" },
     { name: "start_date", definition: "TIMESTAMP NULL DEFAULT NULL" },

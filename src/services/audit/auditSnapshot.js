@@ -128,10 +128,65 @@ export async function createAuditSnapshot({
   // Flatten scope items into criterion-level requirements
   let requirements = flattenScopeRequirements(scopeItems);
 
-  // If milestone audit & milestones exist, scope items can be filtered per milestone if specified
-  if (auditType === "milestone" && milestoneId && requirements.length > 1) {
-    // If milestones have deliverable mappings, keep relevant requirements
-    // For single milestone projects or general deliverables, all deliverables apply
+  // If milestone audit & milestones exist, enrich requirements with milestone-level
+  // checkpoint deliverables and acceptance criteria (from the milestones table).
+  if (auditType === "milestone" && milestoneId) {
+    const msRows = await q.query(
+      "SELECT expected_project_progress, deliverables, acceptance_criteria FROM milestones WHERE id = ?",
+      [milestoneId],
+    );
+
+    if (msRows.length) {
+      const ms = msRows[0];
+      let msDeliverables = ms.deliverables;
+      let msCriteria = ms.acceptance_criteria;
+
+      if (typeof msDeliverables === "string") {
+        try { msDeliverables = JSON.parse(msDeliverables); } catch (_) { msDeliverables = []; }
+      }
+      if (typeof msCriteria === "string") {
+        try { msCriteria = JSON.parse(msCriteria); } catch (_) { msCriteria = []; }
+      }
+
+      // If the milestone has its own checkpoint deliverables/criteria, add them
+      // as supplementary requirements so the AI evaluates against them.
+      const checkpointReqs = [];
+      if (Array.isArray(msDeliverables) && msDeliverables.length > 0) {
+        msDeliverables.forEach((d, idx) => {
+          const dText = typeof d === "string" ? d : d.name || d.description || JSON.stringify(d);
+          checkpointReqs.push({
+            criterion_id: `ms${milestoneId}_chk_d${idx + 1}`,
+            scope_item_id: `ms${milestoneId}_checkpoint`,
+            scope_name: `Milestone Checkpoint Deliverable`,
+            requirement: dText,
+            required: true,
+            critical: false,
+            locked: false,
+            source: "milestone_checkpoint",
+          });
+        });
+      }
+      if (Array.isArray(msCriteria) && msCriteria.length > 0) {
+        msCriteria.forEach((c, idx) => {
+          const cText = typeof c === "string" ? c : c.description || c.text || JSON.stringify(c);
+          checkpointReqs.push({
+            criterion_id: `ms${milestoneId}_chk_ac${idx + 1}`,
+            scope_item_id: `ms${milestoneId}_checkpoint`,
+            scope_name: `Milestone Checkpoint Acceptance Criteria`,
+            requirement: cText,
+            required: true,
+            critical: false,
+            locked: false,
+            source: "milestone_checkpoint",
+          });
+        });
+      }
+
+      if (checkpointReqs.length > 0) {
+        // Merge: milestone-checkpoint requirements first, then global scope requirements
+        requirements = [...checkpointReqs, ...requirements];
+      }
+    }
   }
 
   // 2. Load target submission record

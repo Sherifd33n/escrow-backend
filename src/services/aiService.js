@@ -226,6 +226,83 @@ export function preAnalyzeSubmission(normalizedScope, submissionData) {
 }
 
 /**
+ * Calculate dynamic, strictly ascending milestone progress checkpoints for any milestone count N.
+ * Never hardcodes counts; ensures 100% at the final milestone.
+ */
+export function calculateDynamicMilestoneProgress(count) {
+  const n = parseInt(count);
+  if (isNaN(n) || n <= 0) return [100];
+  if (n === 1) return [100];
+  if (n === 2) return [50, 100];
+  if (n === 3) return [30, 65, 100];
+  if (n === 4) return [25, 50, 75, 100];
+
+  const progress = [];
+  for (let i = 1; i <= n; i++) {
+    if (i === n) {
+      progress.push(100);
+    } else {
+      const raw = Math.round((i / n) * 100);
+      const prev = progress.length > 0 ? progress[progress.length - 1] : 0;
+      const val = Math.max(prev + 1, Math.min(raw, 100 - (n - i)));
+      progress.push(val);
+    }
+  }
+  return progress;
+}
+
+/**
+ * Normalizes milestone checkpoints ensuring expected_project_progress is numeric,
+ * strictly ascending, within [1, 100], and ends at 100%.
+ */
+export function normalizeMilestoneCheckpoints(milestones) {
+  if (!Array.isArray(milestones) || milestones.length === 0) return [];
+  const n = milestones.length;
+  const fallbackProgress = calculateDynamicMilestoneProgress(n);
+
+  let prevProgress = 0;
+  return milestones.map((m, idx) => {
+    let prog =
+      m.expected_project_progress !== undefined &&
+      m.expected_project_progress !== null
+        ? parseInt(m.expected_project_progress)
+        : null;
+
+    if (
+      prog === null ||
+      isNaN(prog) ||
+      prog <= prevProgress ||
+      (idx === n - 1 && prog !== 100) ||
+      prog > 100 ||
+      prog <= 0
+    ) {
+      prog = fallbackProgress[idx];
+    }
+    prevProgress = prog;
+
+    const deliverables = Array.isArray(m.deliverables)
+      ? m.deliverables
+      : typeof m.deliverables === "string" && m.deliverables.trim()
+        ? [m.deliverables.trim()]
+        : [];
+
+    const acceptance_criteria = Array.isArray(m.acceptance_criteria)
+      ? m.acceptance_criteria
+      : typeof m.acceptance_criteria === "string" && m.acceptance_criteria.trim()
+        ? [m.acceptance_criteria.trim()]
+        : [];
+
+    return {
+      ...m,
+      name: m.name || m.title || `Milestone ${idx + 1}`,
+      expected_project_progress: prog,
+      deliverables,
+      acceptance_criteria,
+    };
+  });
+}
+
+/**
  * Generate AI Project Scope server-side and record usage.
  */
 export async function generateAiScope(userId, { categoryLabel, description }) {
@@ -269,21 +346,33 @@ export async function generateAiScope(userId, { categoryLabel, description }) {
           content: `
 You are Escrow's AI Scope Generator for technology, digital, and professional services.
 
-Your job is to convert a client's project description into a clear, professional, specific, measurable and verifiable project scope that can be used as the basis of an escrow contract.
+Your job is to convert a client's project description into a clear, professional, specific, measurable and verifiable project scope where each milestone represents a scheduled PROJECT CHECKPOINT.
 
-DELIVERABLE & MILESTONE STANDARDS:
+A milestone represents:
+"By this specific date/checkpoint, this is the agreed state/progress of the overall project, these are the deliverables expected to exist, these are the acceptance criteria, and this is what the provider must submit for client review."
+
+DELIVERABLE & MILESTONE CHECKPOINT STANDARDS:
 1. Generate specific, customizable deliverables reflecting the user's project requirements.
-2. Deliverable "d1" scope_item_id MUST be "d1" (e.g. Complete Project Deliverables / Source Archive).
-3. Deliverable "d2" scope_item_id MUST be "d2" (e.g. Documentation, Setup Guide & Overview).
+2. Deliverable "d1" scope_item_id MUST be "d1" (e.g. Complete Project Implementation Archive / ZIP).
+3. Deliverable "d2" scope_item_id MUST be "d2" (e.g. Documentation, Summary & Verification Notes).
 4. Acceptance criteria MUST contain verifiable criteria for deliverable inspection.
-5. EXPLICIT CLIENT PARAMETER DETECTION:
+5. MILESTONE PROJECT CHECKPOINTS:
+   - Generate dynamic project checkpoints in the "milestones" array.
+   - For each milestone, provide:
+     * "name": Milestone title (e.g. "Phase 1: Foundation & Setup")
+     * "description": Brief overview of project state at this checkpoint
+     * "expected_project_progress": Integer percentage between 1 and 100 representing cumulative project completion expected at this checkpoint. Must be strictly ascending across milestones, with the final milestone representing 100%. (e.g. for 2 milestones: 50, 100; for 3 milestones: 30, 65, 100; for 4 milestones: 25, 50, 75, 100; or dynamic custom intervals based on work distribution).
+     * "deliverables": Array of specific deliverable titles/descriptions expected to exist at this checkpoint.
+     * "acceptance_criteria": Array of specific criteria required to accept this checkpoint.
+     * "timeline": Expected duration/timeline for this phase (e.g. "Day 2", "Phase 1").
+6. EXPLICIT CLIENT PARAMETER DETECTION:
    - If user specified milestone count in description (e.g. "4 milestones", "3 milestones"), generate EXACTLY that number of milestones in the "milestones" array and set "milestones_count" to that integer.
    - If user specified duration/timeline in description (e.g. "ready in 2 days", "5 days"), set "timeline" to that duration (e.g. "2 days").
    - If user specified review window or short timeframe, set "review_days" to appropriate integer (e.g. 1, 2, or 3 days; default 3 if unspecified).
-6. Timeline MUST be dynamic based on user description or project complexity (e.g. "2 days", "10 days", "2 weeks").
-7. Revision policy should be flexible (e.g. "2 revisions included per milestone").
-8. STRICT FINANCIAL & LEGAL CONSTRAINT: Do NOT invent financial rates, fees, or penalties.
-9. Return ONLY valid JSON. Do not use markdown or code fences.
+7. Timeline MUST be dynamic based on user description or project complexity (e.g. "2 days", "10 days", "2 weeks").
+8. Revision policy should be flexible (e.g. "2 revisions included per milestone").
+9. STRICT FINANCIAL & LEGAL CONSTRAINT: Do NOT invent financial rates, fees, or penalties.
+10. Return ONLY valid JSON. Do not use markdown or code fences.
 
 Return exactly this structure:
 
@@ -304,14 +393,24 @@ Return exactly this structure:
   ],
   "milestones": [
     {
-      "name": "Phase 1 Title",
-      "description": "Delivery of phase 1 assets",
-      "timeline": "Day 1"
+      "name": "Foundation & Core Architecture",
+      "description": "Project setup, authentication, and core database integration.",
+      "expected_project_progress": 30,
+      "deliverables": [
+        "Project setup & structure",
+        "Authentication module",
+        "Database integration"
+      ],
+      "acceptance_criteria": [
+        "User registration and login functional",
+        "Database schemas initialized"
+      ],
+      "timeline": "Day 2"
     }
   ],
-  "milestones_count": 4,
-  "review_days": 2,
-  "timeline": "2 days",
+  "milestones_count": 3,
+  "review_days": 3,
+  "timeline": "10 days",
   "revisions": "2 revisions included per milestone",
   "acceptance": [
     "Project deliverable assets are submitted, verified, and match project scope specifications."
@@ -367,6 +466,8 @@ ${description}
                 name: `Milestone ${i + 1}`,
                 description: `Phase ${i + 1} deliverable inspection and verification`,
                 timeline: `Phase ${i + 1}`,
+                deliverables: [`Phase ${i + 1} deliverables`],
+                acceptance_criteria: [`Phase ${i + 1} criteria verified`],
               });
             }
           }
@@ -376,6 +477,9 @@ ${description}
     } else if (Array.isArray(scopeResult.milestones)) {
       scopeResult.milestones_count = scopeResult.milestones.length;
     }
+
+    // Normalize milestone checkpoints to guarantee numeric strictly ascending progress with final 100%
+    scopeResult.milestones = normalizeMilestoneCheckpoints(scopeResult.milestones);
 
     const durationMatch = descLower.match(/(?:ready|done|complete|completed|due|finish|duration|timeline|in|within)\s*(?:in|within)?\s*(\d+\s*(?:days?|weeks?|months?|hours?))/);
     if (durationMatch && durationMatch[1]) {

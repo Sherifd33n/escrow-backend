@@ -232,6 +232,7 @@ async function resolveTransactionId(paramId) {
 
 import { getUserEntitlements } from "../services/entitlementService.js";
 import { getUsdToNgnRate } from "../services/exchangeRateService.js";
+import { calculateDynamicMilestoneProgress, normalizeMilestoneCheckpoints } from "../services/aiService.js";
 
 async function populateMilestoneDetails(milestones) {
   if (!milestones || milestones.length === 0) return;
@@ -253,6 +254,26 @@ async function populateMilestoneDetails(milestones) {
     });
 
     milestones.forEach((m) => {
+      if (typeof m.deliverables === "string") {
+        try {
+          m.deliverables = JSON.parse(m.deliverables);
+        } catch (e) {
+          m.deliverables = m.deliverables ? [m.deliverables] : [];
+        }
+      } else if (!Array.isArray(m.deliverables)) {
+        m.deliverables = m.deliverables ? [m.deliverables] : [];
+      }
+
+      if (typeof m.acceptance_criteria === "string") {
+        try {
+          m.acceptance_criteria = JSON.parse(m.acceptance_criteria);
+        } catch (e) {
+          m.acceptance_criteria = m.acceptance_criteria ? [m.acceptance_criteria] : [];
+        }
+      } else if (!Array.isArray(m.acceptance_criteria)) {
+        m.acceptance_criteria = m.acceptance_criteria ? [m.acceptance_criteria] : [];
+      }
+
       m.submissions = submissions.filter((s) => s.milestone_id === m.id);
       m.revision_requests = revisions.filter((r) => r.milestone_id === m.id);
       m.evidence_items = evidenceItems.filter((e) => e.milestone_id === m.id);
@@ -626,6 +647,7 @@ router.post("/", async (req, res, next) => {
     const totalAmount = parsedAmount;
     const baseAmount = Number((totalAmount / count).toFixed(2));
     let remaining = totalAmount;
+    const dynamicProgressList = calculateDynamicMilestoneProgress(count);
 
     for (let i = 1; i <= count; i++) {
       const currentAmount =
@@ -633,14 +655,30 @@ router.post("/", async (req, res, next) => {
       remaining -= currentAmount;
 
       const mScope = scopeMilestones ? scopeMilestones[i - 1] : null;
-      const milestoneTitle = mScope?.name || `Milestone ${i} of ${count}`;
+      const milestoneTitle = mScope?.name || mScope?.title || `Milestone ${i} of ${count}`;
       const milestoneDesc = mScope?.description || null;
-      const milestoneTimeline = mScope?.timeline || null;
+      const milestoneTimeline = mScope?.timeline || mScope?.ai_suggested_timeline || null;
+      const milestoneProgress = mScope?.expected_project_progress !== undefined && mScope?.expected_project_progress !== null
+        ? parseInt(mScope.expected_project_progress)
+        : dynamicProgressList[i - 1];
+
+      const milestoneDeliverables = mScope?.deliverables
+        ? (Array.isArray(mScope.deliverables) ? JSON.stringify(mScope.deliverables) : JSON.stringify([mScope.deliverables]))
+        : null;
+
+      const milestoneAcceptance = mScope?.acceptance_criteria
+        ? (Array.isArray(mScope.acceptance_criteria) ? JSON.stringify(mScope.acceptance_criteria) : JSON.stringify([mScope.acceptance_criteria]))
+        : null;
+
+      // Parse due_date from scope milestone (client-set in ScopeModal)
+      const milestoneDueDate = mScope?.due_date
+        ? new Date(mScope.due_date + (mScope.due_date.includes("T") ? "" : "T00:00:00"))
+        : null;
 
       await conn.query(
         `INSERT INTO milestones
-    (transaction_id, title, amount, status, description, ai_suggested_timeline)
-    VALUES (?, ?, ?, ?, ?, ?)`,
+    (transaction_id, title, amount, status, description, ai_suggested_timeline, expected_project_progress, deliverables, acceptance_criteria, due_date)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           transactionId,
           milestoneTitle,
@@ -648,6 +686,10 @@ router.post("/", async (req, res, next) => {
           i === 1 ? MILESTONE_STATUS.UPCOMING : MILESTONE_STATUS.PENDING,
           milestoneDesc,
           milestoneTimeline,
+          milestoneProgress,
+          milestoneDeliverables,
+          milestoneAcceptance,
+          milestoneDueDate,
         ],
       );
     }
@@ -858,20 +900,37 @@ router.patch("/:id/scope", async (req, res, next) => {
 
       const baseAmount = Number((totalAmount / count).toFixed(2));
       let remaining = totalAmount;
+      const dynamicProgressList = calculateDynamicMilestoneProgress(count);
 
       for (let i = 1; i <= count; i++) {
         const currentAmount = i === count ? Number(remaining.toFixed(2)) : baseAmount;
         remaining -= currentAmount;
 
         const mScope = scopeMilestones[i - 1];
-        const milestoneTitle = mScope?.name || `Milestone ${i} of ${count}`;
+        const milestoneTitle = mScope?.name || mScope?.title || `Milestone ${i} of ${count}`;
         const milestoneDesc = mScope?.description || null;
-        const milestoneTimeline = mScope?.timeline || null;
+        const milestoneTimeline = mScope?.timeline || mScope?.ai_suggested_timeline || null;
+        const milestoneProgress = mScope?.expected_project_progress !== undefined && mScope?.expected_project_progress !== null
+          ? parseInt(mScope.expected_project_progress)
+          : dynamicProgressList[i - 1];
+
+        const milestoneDeliverables = mScope?.deliverables
+          ? (Array.isArray(mScope.deliverables) ? JSON.stringify(mScope.deliverables) : JSON.stringify([mScope.deliverables]))
+          : null;
+
+        const milestoneAcceptance = mScope?.acceptance_criteria
+          ? (Array.isArray(mScope.acceptance_criteria) ? JSON.stringify(mScope.acceptance_criteria) : JSON.stringify([mScope.acceptance_criteria]))
+          : null;
+
+        // Parse due_date from scope milestone (client-set in ScopeModal)
+        const milestoneDueDate = mScope?.due_date
+          ? new Date(mScope.due_date + (mScope.due_date.includes("T") ? "" : "T00:00:00"))
+          : null;
 
         await conn.query(
           `INSERT INTO milestones
-           (transaction_id, title, amount, status, description, ai_suggested_timeline)
-           VALUES (?, ?, ?, ?, ?, ?)`,
+           (transaction_id, title, amount, status, description, ai_suggested_timeline, expected_project_progress, deliverables, acceptance_criteria, due_date)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             transactionId,
             milestoneTitle,
@@ -879,6 +938,10 @@ router.patch("/:id/scope", async (req, res, next) => {
             i === 1 ? MILESTONE_STATUS.UPCOMING : MILESTONE_STATUS.PENDING,
             milestoneDesc,
             milestoneTimeline,
+            milestoneProgress,
+            milestoneDeliverables,
+            milestoneAcceptance,
+            milestoneDueDate,
           ]
         );
       }
@@ -887,9 +950,23 @@ router.patch("/:id/scope", async (req, res, next) => {
       for (let i = 0; i < Math.min(scopeMilestones.length, dbMilestones.length); i++) {
         const sm = scopeMilestones[i];
         const dm = dbMilestones[i];
+        const smProgress = sm.expected_project_progress !== undefined && sm.expected_project_progress !== null
+          ? parseInt(sm.expected_project_progress)
+          : dm.expected_project_progress;
+        const smDeliverables = sm.deliverables
+          ? (Array.isArray(sm.deliverables) ? JSON.stringify(sm.deliverables) : JSON.stringify([sm.deliverables]))
+          : (dm.deliverables ? (typeof dm.deliverables === "string" ? dm.deliverables : JSON.stringify(dm.deliverables)) : null);
+        const smAcceptance = sm.acceptance_criteria
+          ? (Array.isArray(sm.acceptance_criteria) ? JSON.stringify(sm.acceptance_criteria) : JSON.stringify([sm.acceptance_criteria]))
+          : (dm.acceptance_criteria ? (typeof dm.acceptance_criteria === "string" ? dm.acceptance_criteria : JSON.stringify(dm.acceptance_criteria)) : null);
+
+        const smDueDate = sm.due_date
+          ? new Date(sm.due_date + (sm.due_date.includes("T") ? "" : "T00:00:00"))
+          : dm.due_date || null;
+
         await conn.query(
-          `UPDATE milestones SET title = ?, description = ?, ai_suggested_timeline = ? WHERE id = ?`,
-          [sm.name || dm.title, sm.description || null, sm.timeline || null, dm.id]
+          `UPDATE milestones SET title = ?, description = ?, ai_suggested_timeline = ?, expected_project_progress = ?, deliverables = ?, acceptance_criteria = ?, due_date = ? WHERE id = ?`,
+          [sm.name || sm.title || dm.title, sm.description || null, sm.timeline || null, smProgress, smDeliverables, smAcceptance, smDueDate, dm.id]
         );
       }
     }
@@ -1578,7 +1655,7 @@ router.post("/:id/cancel", async (req, res, next) => {
 // 5. POST /:id/milestones - Add a milestone to a transaction
 router.post("/:id/milestones", async (req, res, next) => {
   const transactionId = req.params.id;
-  const { title, amount } = req.body;
+  const { title, amount, description, expected_project_progress, deliverables, acceptance_criteria } = req.body;
   const userId = req.user.id;
 
   if (!title || !amount) {
@@ -1689,9 +1766,22 @@ router.post("/:id/milestones", async (req, res, next) => {
       );
     }
 
+    // Serialize checkpoint fields if provided
+    const msDescription = typeof description === "string" ? description.trim() || null : null;
+    const msProgress = expected_project_progress !== undefined && expected_project_progress !== null
+      ? parseInt(expected_project_progress) || null
+      : null;
+    const msDeliverables = Array.isArray(deliverables) && deliverables.length > 0
+      ? JSON.stringify(deliverables)
+      : null;
+    const msCriteria = Array.isArray(acceptance_criteria) && acceptance_criteria.length > 0
+      ? JSON.stringify(acceptance_criteria)
+      : null;
+
     await conn.query(
-      "INSERT INTO milestones (transaction_id, title, amount, status) VALUES (?, ?, ?, ?)",
-      [transactionId, cleanTitle, milestoneAmount, MILESTONE_STATUS.PENDING],
+      `INSERT INTO milestones (transaction_id, title, amount, status, description, expected_project_progress, deliverables, acceptance_criteria)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [transactionId, cleanTitle, milestoneAmount, MILESTONE_STATUS.PENDING, msDescription, msProgress, msDeliverables, msCriteria],
     );
 
     await conn.query(
