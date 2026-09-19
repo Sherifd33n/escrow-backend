@@ -204,12 +204,23 @@ export async function auditRequirementsWithAi({
     ? submissionData.deliverables
     : [];
 
+  const overallNotes =
+    submissionData?.provider_notes ||
+    submissionData?.summary ||
+    submissionData?.deliverable_note ||
+    "";
+
   const auditItems = requirements.map((req) => {
     const sub = deliverables.find(
       (d) => d && (d.scope_item_id === req.scope_item_id || d.id === req.scope_item_id),
     );
     const checks = deterministicChecks[req.criterion_id] || {};
     const matchData = reqMatches[req.criterion_id] || { matchedFiles: [], matchedSymbols: [], evidenceSnippets: [] };
+
+    const claim =
+      sub?.claim ||
+      overallNotes ||
+      "Milestone source code and deliverable archive submitted.";
 
     return {
       criterion_id: req.criterion_id,
@@ -218,7 +229,7 @@ export async function auditRequirementsWithAi({
       requirement: req.requirement,
       required: req.required,
       critical: req.critical,
-      provider_claim: (sub?.claim || "No claim provided").slice(0, 300),
+      provider_claim: claim.slice(0, 300),
       deterministic_facts: checks.facts || [],
       relevant_source_files: matchData.matchedFiles.map((f) => f.path),
       relevant_symbols: matchData.matchedSymbols,

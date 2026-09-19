@@ -79,10 +79,21 @@ export function runDeterministicChecks({
     const subDeliverable = deliverables.find(
       (d) => d && (d.scope_item_id === scopeItemId || d.id === scopeItemId),
     );
-    const submissionExists = !!subDeliverable;
+    const isMilestoneCheckpoint =
+      req.source === "milestone_checkpoint" ||
+      (typeof scopeItemId === "string" && scopeItemId.includes("checkpoint"));
+
+    const submissionExists =
+      !!subDeliverable ||
+      (isMilestoneCheckpoint && deliverables.length > 0) ||
+      (deliverables.length > 0 && extractedFiles.length > 0);
 
     if (submissionExists) {
-      facts.push(`Provider submitted deliverable for ${scopeItemId} (${subDeliverable.status || "completed"}).`);
+      facts.push(
+        subDeliverable
+          ? `Provider submitted deliverable for ${scopeItemId} (${subDeliverable.status || "completed"}).`
+          : `Provider submitted milestone implementation deliverable covering checkpoint criteria.`
+      );
     } else {
       facts.push(`No direct provider submission found for scope item ${scopeItemId}.`);
     }
@@ -93,6 +104,7 @@ export function runDeterministicChecks({
         !e.scope_item_id ||
         e.scope_item_id === scopeItemId ||
         e.criterion_id === criterionId ||
+        isMilestoneCheckpoint ||
         e.evidence_type === "zip" ||
         e.evidence_type === "repository" ||
         e.evidence_type === "documentation" ||

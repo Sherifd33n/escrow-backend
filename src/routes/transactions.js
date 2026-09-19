@@ -1406,74 +1406,14 @@ router.patch("/:id/status", async (req, res, next) => {
     );
     const currentTx = refreshedTxs[0];
 
-    // If status becomes APPROVED or COMPLETED, release escrow funds to seller's wallet balance
+    // If status becomes APPROVED, mark all milestones as approved but do NOT release escrow funds.
+    // Funds are released separately via POST /:id/release-escrow when the client is satisfied.
     if (
-      [TRANSACTION_STATUS.APPROVED, TRANSACTION_STATUS.COMPLETED].includes(nextStatus) &&
+      nextStatus === TRANSACTION_STATUS.APPROVED &&
       previousStatus !== TRANSACTION_STATUS.COMPLETED
     ) {
-      // Fetch milestones associated with transaction FOR UPDATE
-      const [allMilestones] = await conn.query(
-        "SELECT * FROM milestones WHERE transaction_id = ? ORDER BY id ASC FOR UPDATE",
-        [currentTx.id],
-      );
-
-      // Verify all milestones are completely paid into escrow before release can proceed
-      const hasUnpaidMilestones = allMilestones.some(
-        (m) =>
-          m.status === MILESTONE_STATUS.PENDING ||
-          m.status === MILESTONE_STATUS.UPCOMING ||
-          m.status === MILESTONE_STATUS.DUE,
-      );
-
-      const totalEscrowFunded =
-        parseFloat(currentTx.escrow_balance || 0) +
-        parseFloat(currentTx.released_amount || 0);
-      const totalTransactionAmount = parseFloat(currentTx.amount || 0);
-
-      const allPaidIntoEscrow =
-        !hasUnpaidMilestones &&
-        (totalTransactionAmount <= 0 || totalEscrowFunded >= totalTransactionAmount - 0.01);
-
-      if (!allPaidIntoEscrow) {
-        return rollbackWithError(
-          conn,
-          res,
-          400,
-          "Accept & Release can only be completed when all milestones are fully paid into escrow.",
-        );
-      }
-
-      const totalReleaseAmount = parseFloat(currentTx.escrow_balance || 0);
-
-      if (totalReleaseAmount > 0) {
-        const { wallet } = await releaseEscrow({
-          conn,
-          transaction: currentTx,
-          recipientId: currentTx.seller_id,
-          amount: totalReleaseAmount,
-        });
-
-        await logTransactionEvent({
-          conn,
-          transactionId: currentTx.id,
-          userId,
-          action: "full_escrow_released",
-          note: `Released total escrow balance (${totalReleaseAmount}) to seller balance`,
-          metadata: {
-            sellerId: currentTx.seller_id,
-            walletId: wallet.id,
-            amount: totalReleaseAmount,
-          },
-        });
-      }
-
       await conn.query("UPDATE milestones SET status = ? WHERE transaction_id = ?", [
         MILESTONE_STATUS.APPROVED,
-        currentTx.id,
-      ]);
-
-      await conn.query("UPDATE transactions SET status = ? WHERE id = ?", [
-        TRANSACTION_STATUS.COMPLETED,
         currentTx.id,
       ]);
     }
@@ -1963,31 +1903,6 @@ router.patch("/milestones/:id/status", async (req, res, next) => {
       );
     }
 
-    // Require all milestones to be fully paid into escrow before releasing funds to provider
-    if (status === MILESTONE_STATUS.APPROVED) {
-      const [allTxMilestones] = await conn.query(
-        "SELECT * FROM milestones WHERE transaction_id = ? ORDER BY id ASC FOR UPDATE",
-        [tx.id]
-      );
-      const hasUnfundedMilestones = allTxMilestones.some(
-        (m) => m.id !== parseInt(milestoneId) && !["paid", "approved"].includes(m.status)
-      );
-
-      const totalEscrowFunded = parseFloat(tx.escrow_balance || 0) + parseFloat(tx.released_amount || 0);
-      const totalTransactionAmount = parseFloat(tx.amount || 0);
-
-      const allPaidIntoEscrow = !hasUnfundedMilestones && (totalTransactionAmount <= 0 || totalEscrowFunded >= totalTransactionAmount - 0.01);
-
-      if (!allPaidIntoEscrow) {
-        return rollbackWithError(
-          conn,
-          res,
-          400,
-          "All milestones must be fully funded into escrow before releasing funds to the service provider."
-        );
-      }
-    }
-
     // A deliverable note or submission_data may only be attached by the seller when submitting a milestone deliverable
     if ((deliverableNote || submission_data) && status === MILESTONE_STATUS.SUBMITTED && userId !== tx.seller_id) {
       return rollbackWithError(
@@ -2112,39 +2027,13 @@ router.patch("/milestones/:id/status", async (req, res, next) => {
       });
     }
 
-    let sellerWalletResult = null;
     let autoCompletedTransaction = false;
 
     if (status === MILESTONE_STATUS.APPROVED) {
-      // 1. Release funds allocated for THIS milestone to seller wallet
-      const milestoneAmount = parseFloat(milestone.amount || 0);
-      const currentEscrow = parseFloat(tx.escrow_balance || 0);
-      const releaseAmount = Math.min(currentEscrow, milestoneAmount);
+      // Milestone approved — NO fund release here.
+      // Funds are released separately via POST /:id/release-escrow.
 
-      if (releaseAmount > 0) {
-        sellerWalletResult = await releaseEscrow({
-          conn,
-          transaction: tx,
-          recipientId: tx.seller_id,
-          amount: releaseAmount,
-        });
-
-        await logTransactionEvent({
-          conn,
-          transactionId: tx.id,
-          userId,
-          action: "milestone_escrow_released",
-          note: `Released escrow funds ($${releaseAmount}) for milestone "${milestone.title}" to provider balance`,
-          metadata: {
-            milestoneId,
-            sellerId: tx.seller_id,
-            amount: releaseAmount,
-            walletId: sellerWalletResult.wallet.id,
-          },
-        });
-      }
-
-      // 2. Query all milestones for transaction to check if ALL required milestones are approved
+      // Query all milestones for transaction to check if ALL are now approved
       const [allMilestones] = await conn.query(
         "SELECT * FROM milestones WHERE transaction_id = ? ORDER BY id ASC FOR UPDATE",
         [tx.id],
@@ -2153,38 +2042,26 @@ router.patch("/milestones/:id/status", async (req, res, next) => {
       const allApproved = allMilestones.length > 0 && allMilestones.every((m) => m.status === MILESTONE_STATUS.APPROVED);
 
       if (allApproved) {
-        // If final milestone approved, release any remaining escrow balance and mark COMPLETED
-        const remainingEscrow = parseFloat(tx.escrow_balance || 0);
-        if (remainingEscrow > 0) {
-          const extraRelease = await releaseEscrow({
-            conn,
-            transaction: tx,
-            recipientId: tx.seller_id,
-            amount: remainingEscrow,
-          });
-          if (!sellerWalletResult) sellerWalletResult = extraRelease;
-        }
-
-        if (tx.status !== TRANSACTION_STATUS.COMPLETED) {
+        // All milestones approved — move transaction to 'approved' status.
+        // The client can then explicitly release escrow funds when satisfied.
+        if (tx.status !== TRANSACTION_STATUS.APPROVED && tx.status !== TRANSACTION_STATUS.COMPLETED) {
           await updateTransactionStatus({
             conn,
             transaction: tx,
             userId,
-            nextStatus: TRANSACTION_STATUS.COMPLETED,
-            action: "all_milestones_completed",
+            nextStatus: TRANSACTION_STATUS.APPROVED,
+            action: "all_milestones_approved",
           });
 
           await logTransactionEvent({
             conn,
             transactionId: tx.id,
             userId,
-            action: "transaction_completed",
+            action: "all_milestones_approved",
             fromStatus: tx.status,
-            toStatus: TRANSACTION_STATUS.COMPLETED,
-            note: "All milestones approved and released. Transaction marked as completed.",
+            toStatus: TRANSACTION_STATUS.APPROVED,
+            note: "All milestones approved. Awaiting client to release escrow funds.",
           });
-
-          autoCompletedTransaction = true;
         }
       } else {
         // Multi-milestone project: keep transaction active ('inprogress')
@@ -2236,40 +2113,6 @@ router.patch("/milestones/:id/status", async (req, res, next) => {
         sms: true,
         push: true,
       }).catch((err) => console.error("Notification dispatch error:", err));
-
-      if (sellerWalletResult) {
-        notify({
-          userId: tx.seller_id,
-          type: NOTIFICATION_TYPE.WALLET_FUNDED,
-          data: {
-            amount: parseFloat(milestone.amount).toFixed(2),
-            balance: sellerWalletResult.balance.toFixed(2),
-          },
-          email: true,
-          sms: true,
-          push: true,
-        }).catch((err) => console.error("Notification dispatch error:", err));
-      }
-
-      if (autoCompletedTransaction) {
-        notify({
-          userId: tx.buyer_id,
-          type: NOTIFICATION_TYPE.TRANSACTION_COMPLETED,
-          data: { transaction: tx.title },
-          email: true,
-          sms: true,
-          push: true,
-        }).catch((err) => console.error("Notification dispatch error:", err));
-
-        notify({
-          userId: tx.seller_id,
-          type: NOTIFICATION_TYPE.TRANSACTION_COMPLETED,
-          data: { transaction: tx.title },
-          email: true,
-          sms: true,
-          push: true,
-        }).catch((err) => console.error("Notification dispatch error:", err));
-      }
     } else if (status === MILESTONE_STATUS.REJECTED) {
       notify({
         userId: tx.seller_id,
@@ -2288,6 +2131,153 @@ router.patch("/milestones/:id/status", async (req, res, next) => {
     res.json({
       message: "Milestone updated successfully.",
       status,
+    });
+  } catch (error) {
+    await conn.rollback();
+    next(error);
+  } finally {
+    conn.release();
+  }
+});
+
+// 6b. POST /:id/release-escrow - Client explicitly releases escrow funds to provider
+// This is separate from milestone approval — funds only release when the client is satisfied
+// with the entire project after all milestones are approved.
+router.post("/:id/release-escrow", async (req, res, next) => {
+  const userId = req.user.id;
+
+  const conn = await db.getPool().getConnection();
+  try {
+    await conn.beginTransaction();
+
+    const transactionId = await resolveTransactionId(req.params.id);
+    if (!transactionId) {
+      await conn.rollback();
+      return res.status(404).json({ error: "Transaction not found." });
+    }
+
+    const [txs] = await conn.query(
+      "SELECT * FROM transactions WHERE id = ? FOR UPDATE",
+      [transactionId],
+    );
+    if (!txs.length) {
+      await conn.rollback();
+      return res.status(404).json({ error: "Transaction not found." });
+    }
+    const tx = txs[0];
+
+    // Only the buyer (client) can release escrow funds
+    if (tx.buyer_id !== userId) {
+      await conn.rollback();
+      return res.status(403).json({ error: "Only the client can release escrow funds." });
+    }
+
+    // Transaction must be in 'approved' status (all milestones approved)
+    if (tx.status !== TRANSACTION_STATUS.APPROVED) {
+      await conn.rollback();
+      return res.status(400).json({
+        error: "Escrow can only be released when all milestones are approved and the transaction is in 'approved' status.",
+      });
+    }
+
+    // Verify all milestones are approved
+    const [allMilestones] = await conn.query(
+      "SELECT * FROM milestones WHERE transaction_id = ? ORDER BY id ASC FOR UPDATE",
+      [tx.id],
+    );
+
+    const allApproved = allMilestones.length > 0 && allMilestones.every(
+      (m) => m.status === MILESTONE_STATUS.APPROVED,
+    );
+
+    if (!allApproved) {
+      await conn.rollback();
+      return res.status(400).json({
+        error: "All milestones must be approved before escrow funds can be released.",
+      });
+    }
+
+    // Release the entire escrow balance to the provider
+    const totalReleaseAmount = parseFloat(tx.escrow_balance || 0);
+    let sellerWalletResult = null;
+
+    if (totalReleaseAmount > 0) {
+      sellerWalletResult = await releaseEscrow({
+        conn,
+        transaction: tx,
+        recipientId: tx.seller_id,
+        amount: totalReleaseAmount,
+      });
+
+      await logTransactionEvent({
+        conn,
+        transactionId: tx.id,
+        userId,
+        action: "full_escrow_released",
+        note: `Client released total escrow balance ($${totalReleaseAmount.toFixed(2)}) to provider wallet`,
+        metadata: {
+          sellerId: tx.seller_id,
+          walletId: sellerWalletResult.wallet.id,
+          amount: totalReleaseAmount,
+        },
+      });
+    }
+
+    // Mark transaction as completed
+    await updateTransactionStatus({
+      conn,
+      transaction: tx,
+      userId,
+      nextStatus: TRANSACTION_STATUS.COMPLETED,
+      action: "escrow_released_by_client",
+    });
+
+    await logTransactionEvent({
+      conn,
+      transactionId: tx.id,
+      userId,
+      action: "transaction_completed",
+      fromStatus: tx.status,
+      toStatus: TRANSACTION_STATUS.COMPLETED,
+      note: "Client released escrow funds. Transaction marked as completed.",
+    });
+
+    await conn.commit();
+
+    // Send notifications after commit
+    notify({
+      userId: tx.seller_id,
+      type: NOTIFICATION_TYPE.WALLET_FUNDED,
+      data: {
+        amount: totalReleaseAmount.toFixed(2),
+        balance: sellerWalletResult ? sellerWalletResult.wallet.balance.toFixed(2) : "0.00",
+      },
+      email: true,
+      sms: true,
+      push: true,
+    }).catch((err) => console.error("Notification dispatch error:", err));
+
+    notify({
+      userId: tx.buyer_id,
+      type: NOTIFICATION_TYPE.TRANSACTION_COMPLETED,
+      data: { transaction: tx.title },
+      email: true,
+      sms: true,
+      push: true,
+    }).catch((err) => console.error("Notification dispatch error:", err));
+
+    notify({
+      userId: tx.seller_id,
+      type: NOTIFICATION_TYPE.TRANSACTION_COMPLETED,
+      data: { transaction: tx.title },
+      email: true,
+      sms: true,
+      push: true,
+    }).catch((err) => console.error("Notification dispatch error:", err));
+
+    res.json({
+      message: "Escrow funds released successfully. Transaction completed.",
+      released: totalReleaseAmount,
     });
   } catch (error) {
     await conn.rollback();
