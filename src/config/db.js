@@ -879,6 +879,8 @@ WHERE is_verified IS NULL;
     { name: "ai_suggested_timeline", definition: "VARCHAR(100) DEFAULT NULL" },
     { name: "start_date", definition: "TIMESTAMP NULL DEFAULT NULL" },
     { name: "due_date", definition: "TIMESTAMP NULL DEFAULT NULL" },
+    { name: "is_funded", definition: "TINYINT(1) NOT NULL DEFAULT 0" },
+    { name: "funded_at", definition: "TIMESTAMP NULL DEFAULT NULL" },
   ];
 
   for (const col of milestoneColumns) {
@@ -895,6 +897,30 @@ WHERE is_verified IS NULL;
     } catch (err) {
       console.error(`Migration failed for milestones.${col.name}`, err);
     }
+  }
+
+  // Backfill is_funded = 1 for historical milestones that were explicitly paid or first milestone of funded transactions
+  try {
+    await conn.query(`
+      UPDATE milestones 
+      SET is_funded = 1 
+      WHERE status = 'paid' AND is_funded = 0
+    `);
+    await conn.query(`
+      UPDATE milestones m
+      JOIN (
+        SELECT transaction_id, MIN(id) as first_m_id 
+        FROM milestones 
+        GROUP BY transaction_id
+      ) f ON m.id = f.first_m_id
+      JOIN transactions t ON m.transaction_id = t.id
+      SET m.is_funded = 1
+      WHERE t.status IN ('funded', 'inprogress', 'inspection', 'audit', 'approved', 'completed')
+        AND (t.escrow_balance > 0 OR t.released_amount > 0)
+        AND m.is_funded = 0
+    `);
+  } catch (err) {
+    // Non-fatal backfill
   }
 
   // ----------------------------------------------------

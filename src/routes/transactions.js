@@ -2197,6 +2197,19 @@ router.post("/:id/release-escrow", async (req, res, next) => {
       });
     }
 
+    // Verify all milestones are fully funded into escrow
+    const allFunded = allMilestones.length > 0 && (
+      allMilestones.every((m) => !!m.is_funded) ||
+      parseFloat(tx.escrow_balance || 0) >= parseFloat(tx.amount || 0) - 0.01
+    );
+
+    if (!allFunded) {
+      await conn.rollback();
+      return res.status(400).json({
+        error: "All milestones must be fully funded into escrow before releasing payment to the service provider. Please fund any remaining unpaid milestones.",
+      });
+    }
+
     // Release the entire escrow balance to the provider
     const totalReleaseAmount = parseFloat(tx.escrow_balance || 0);
     let sellerWalletResult = null;
@@ -2345,13 +2358,13 @@ router.post("/milestones/:id/pay", async (req, res, next) => {
       );
     }
 
-    // 4. Verify status is not already paid
-    if ([MILESTONE_STATUS.PAID, MILESTONE_STATUS.APPROVED].includes(milestone.status)) {
+    // 4. Verify milestone is not already funded
+    if (milestone.is_funded || milestone.status === MILESTONE_STATUS.PAID) {
       return rollbackWithError(
         conn,
         res,
         400,
-        `Milestone is already paid or approved. Current status: ${milestone.status}`,
+        "This milestone has already been funded into escrow.",
       );
     }
 
@@ -2390,11 +2403,20 @@ router.post("/milestones/:id/pay", async (req, res, next) => {
       },
     });
 
-    // 8. Update milestone status to 'paid'
-    await conn.query("UPDATE milestones SET status = ? WHERE id = ?", [
-      MILESTONE_STATUS.PAID,
-      milestoneId,
-    ]);
+    // 8. Mark milestone as funded without overwriting submitted/approved deliverable status
+    const newStatus = [
+      MILESTONE_STATUS.SUBMITTED,
+      MILESTONE_STATUS.APPROVED,
+      MILESTONE_STATUS.REJECTED,
+      MILESTONE_STATUS.INPROGRESS,
+    ].includes(milestone.status)
+      ? milestone.status
+      : MILESTONE_STATUS.PAID;
+
+    await conn.query(
+      "UPDATE milestones SET is_funded = 1, funded_at = CURRENT_TIMESTAMP, status = ? WHERE id = ?",
+      [newStatus, milestoneId],
+    );
 
     if (tx.status === TRANSACTION_STATUS.PENDING) {
       // If agreed_deadline is not yet set, compute it based on funding time + agreed_duration
@@ -2492,7 +2514,7 @@ router.post("/milestones/:id/pay", async (req, res, next) => {
       [tx.id],
     );
     const allPaid = updatedMilestones.every(
-      (m) => m.status === MILESTONE_STATUS.PAID,
+      (m) => !!m.is_funded || m.status === MILESTONE_STATUS.PAID,
     );
 
     if (allPaid && tx.status === TRANSACTION_STATUS.FUNDED) {
