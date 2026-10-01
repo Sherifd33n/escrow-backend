@@ -1407,6 +1407,54 @@ WHERE is_verified IS NULL;
   } catch (err) {
     console.error("Migration failed for Paystack tables:", err);
   }
+
+  // ----------------------------------------------------
+  // B2B DEVELOPER PLATFORM MIGRATIONS (api_keys, partner_webhooks_log)
+  // ----------------------------------------------------
+  try {
+    await conn.query(`
+      CREATE TABLE IF NOT EXISTS \`api_keys\` (
+        \`id\` INT AUTO_INCREMENT PRIMARY KEY,
+        \`user_id\` INT NOT NULL,
+        \`name\` VARCHAR(100) NOT NULL DEFAULT 'Default API Key',
+        \`public_key\` VARCHAR(100) NOT NULL UNIQUE,
+        \`secret_key\` VARCHAR(255) NOT NULL,
+        \`environment\` ENUM('test', 'live') NOT NULL DEFAULT 'test',
+        \`webhook_url\` VARCHAR(500) DEFAULT NULL,
+        \`webhook_secret\` VARCHAR(100) DEFAULT NULL,
+        \`is_active\` TINYINT(1) NOT NULL DEFAULT 1,
+        \`rate_limit_per_min\` INT NOT NULL DEFAULT 120,
+        \`last_used_at\` TIMESTAMP NULL DEFAULT NULL,
+        \`created_at\` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        \`updated_at\` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX \`idx_api_keys_public\` (\`public_key\`),
+        INDEX \`idx_api_keys_user\` (\`user_id\`),
+        FOREIGN KEY (\`user_id\`) REFERENCES \`users\` (\`id\`) ON DELETE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    `);
+    console.log("Migration: api_keys table checked/created.");
+
+    await conn.query(`
+      CREATE TABLE IF NOT EXISTS \`partner_webhooks_log\` (
+        \`id\` INT AUTO_INCREMENT PRIMARY KEY,
+        \`api_key_id\` INT NOT NULL,
+        \`event_type\` VARCHAR(80) NOT NULL,
+        \`transaction_id\` INT DEFAULT NULL,
+        \`target_url\` VARCHAR(500) NOT NULL,
+        \`payload\` JSON NOT NULL,
+        \`response_status\` INT DEFAULT NULL,
+        \`response_body\` TEXT DEFAULT NULL,
+        \`status\` ENUM('success', 'failed', 'pending') NOT NULL DEFAULT 'pending',
+        \`attempts\` INT NOT NULL DEFAULT 1,
+        \`created_at\` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        INDEX \`idx_pw_key\` (\`api_key_id\`),
+        INDEX \`idx_pw_status\` (\`status\`)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    `);
+    console.log("Migration: partner_webhooks_log table checked/created.");
+  } catch (err) {
+    console.error("Migration failed for B2B API tables:", err);
+  }
 }
 
 export async function query(sql, params) {

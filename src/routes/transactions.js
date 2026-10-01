@@ -295,7 +295,12 @@ router.get("/", async (req, res, next) => {
        FROM transactions t
        LEFT JOIN users u_buyer ON t.buyer_id = u_buyer.id
        LEFT JOIN users u_seller ON t.seller_id = u_seller.id
-       WHERE (t.buyer_id = ? OR t.seller_id = ?)`;
+       WHERE (t.buyer_id = ? OR t.seller_id = ?)
+         AND (
+           t.scope_json IS NULL
+           OR JSON_UNQUOTE(JSON_EXTRACT(t.scope_json, '$.environment')) IS NULL
+           OR JSON_UNQUOTE(JSON_EXTRACT(t.scope_json, '$.environment')) != 'test'
+         )`;
 
     const params = [userId, userId];
 
@@ -457,6 +462,11 @@ router.post("/", async (req, res, next) => {
     });
   }
 
+  // --------------------------------------------------------------------------
+  // [SUBSCRIPTION SYSTEM COMMENTED OUT - PURE ESCROW FEE COMMISSION MODEL]
+  // Deal counts and multi-currency are open to standard platform users.
+  // --------------------------------------------------------------------------
+  /*
   // 2. Active deal limit check
   if (entitlements.usage.activeDealsCount >= entitlements.limits.maxActiveDeals) {
     const msg = `You have reached your limit of active deals (${entitlements.limits.maxActiveDeals}) for your current plan. Please upgrade your subscription plan to create more escrows.`;
@@ -517,6 +527,7 @@ router.post("/", async (req, res, next) => {
       error: msg,
     });
   }
+  */
 
   // Determine & snapshot fee rate and amount
   const escrowFeeRate = entitlements.limits.escrowFeeRate;

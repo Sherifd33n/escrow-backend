@@ -17,6 +17,8 @@ import auditJobsRoutes from "./routes/auditJobs.js";
 import paymentsRoutes from "./routes/payments.js";
 import bankAccountsRoutes from "./routes/bankAccounts.js";
 import withdrawalsRoutes from "./routes/withdrawals.js";
+import v1EscrowsRoutes from "./routes/v1/escrows.js";
+import apiKeysRoutes from "./routes/apiKeys.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -92,6 +94,10 @@ app.use("/api/admin", adminRoutes);
 app.use("/api/payments", paymentsRoutes);
 app.use("/api/bank-accounts", bankAccountsRoutes);
 app.use("/api/withdrawals", withdrawalsRoutes);
+
+// B2B Developer Platform & v1 Escrow API
+app.use("/api/developer/keys", apiKeysRoutes);
+app.use("/api/v1/escrows", v1EscrowsRoutes);
 
 // Root check
 app.get("/", (req, res) => {

@@ -127,7 +127,12 @@ export async function getUserEntitlements(userId) {
   const user = users[0];
   const userKycTier = Number(user.kyc_tier) || 1;
 
-  // 2. Fetch current subscription (must be active AND have a verified payment reference)
+  // --------------------------------------------------------------------------
+  // [SUBSCRIPTION SYSTEM COMMENTED OUT - PURE ESCROW FEE COMMISSION MODEL]
+  // Previously: queried 'subscriptions' table and evaluated tier lifecycle rules.
+  // Currently: all users operate on standard platform tier with pure escrow fee commission.
+  // --------------------------------------------------------------------------
+  /*
   const subRows = await db.query(
     "SELECT * FROM subscriptions WHERE user_id = ? AND status = 'active' AND provider_reference_id IS NOT NULL",
     [userId]
@@ -244,15 +249,22 @@ export async function getUserEntitlements(userId) {
 
   const isSubActive = subStatus === "active" && planId !== null;
   const planConfig = isSubActive ? PLAN_CONFIGS[planId] : null;
+  */
 
-  // 3. Compute effective entitlement level: min(subscriptionTier, kycTier) if active, else 1
-  const effectiveLevel = isSubActive ? Math.min(subscriptionTier, userKycTier) : 1;
+  const isSubActive = false;
+  const subStatus = "none";
+  const planId = null;
+  const planName = null;
+  const subscriptionTier = 0;
+  const billingCycle = null;
+  const startsAt = null;
+  const endsAt = null;
 
-  // Effective capabilities derived from effectiveLevel & planConfig
-  const levelLimits = LEVEL_LIMITS[effectiveLevel] || LEVEL_LIMITS[1];
+  // 3. Compute effective entitlement level: purely based on KYC tier (default minimum 2 for active platform users)
+  const effectiveLevel = Math.max(userKycTier, 2);
 
-  // Fee rate is based on purchased active plan (if active) or effective level
-  const escrowFeeRate = isSubActive && planConfig ? planConfig.escrowFeeRate : levelLimits.escrowFeeRate;
+  // Escrow commission fee rate: standard platform fee (3.5%)
+  const escrowFeeRate = 0.035;
 
   // 4. Count current active deals for user
   const activeDealsRows = await db.query(
@@ -275,15 +287,12 @@ export async function getUserEntitlements(userId) {
   );
   const aiAuditsUsed = aiUsageRows[0]?.count || 0;
 
-  // AI audits quota comes from active subscription plan (or level limits if no active sub)
-  const maxAiAudits = isSubActive && planConfig ? planConfig.aiAuditsPerMonth : levelLimits.aiAuditsPerMonth;
-  const aiAuditsRemaining = maxAiAudits === Number.MAX_SAFE_INTEGER 
-    ? Number.MAX_SAFE_INTEGER 
-    : Math.max(0, maxAiAudits - aiAuditsUsed);
+  const maxAiAudits = 50;
+  const aiAuditsRemaining = Math.max(0, maxAiAudits - aiAuditsUsed);
 
-  const canUseMultiCurrency = isSubActive && planConfig ? planConfig.canUseMultiCurrency : levelLimits.canUseMultiCurrency;
-  const canUseWhiteLabel = isSubActive && planConfig ? planConfig.canUseWhiteLabel : levelLimits.canUseWhiteLabel;
-  const canGenerateUnlimitedContracts = isSubActive && planConfig ? planConfig.canGenerateUnlimitedContracts : levelLimits.canGenerateUnlimitedContracts;
+  const canUseMultiCurrency = true;
+  const canUseWhiteLabel = true;
+  const canGenerateUnlimitedContracts = true;
 
   return {
     user: {
@@ -293,16 +302,16 @@ export async function getUserEntitlements(userId) {
       role: user.role,
     },
     subscription: {
-      plan: isSubActive ? planId : null,
-      planName: isSubActive ? planName : null,
-      status: subStatus,
-      billingCycle: isSubActive ? billingCycle : null,
+      plan: null,
+      planName: "Standard",
+      status: "none",
+      billingCycle: null,
       startsAt,
       endsAt,
-      subscriptionTier: isSubActive ? subscriptionTier : 0,
-      pendingPlan: isSubActive && activeSub?.pending_plan_id ? activeSub.pending_plan_id.toLowerCase() : null,
-      pendingPlanName: isSubActive && activeSub?.pending_plan_id && PLAN_CONFIGS[activeSub.pending_plan_id.toLowerCase()] ? PLAN_CONFIGS[activeSub.pending_plan_id.toLowerCase()].name : null,
-      pendingBillingCycle: isSubActive && activeSub?.pending_plan_id ? activeSub.pending_billing_cycle : null,
+      subscriptionTier: 0,
+      pendingPlan: null,
+      pendingPlanName: null,
+      pendingBillingCycle: null,
     },
     kyc: {
       level: userKycTier,
@@ -314,23 +323,22 @@ export async function getUserEntitlements(userId) {
       aiAuditsUsedThisMonth: aiAuditsUsed,
     },
     limits: {
-      maxEscrowUsd: levelLimits.maxEscrowUsd,
-      // Subscription-based limits: use paid plan config when active, else fall back to level limits
-      maxActiveDeals: isSubActive && planConfig ? planConfig.maxActiveDeals : levelLimits.maxActiveDeals,
+      maxEscrowUsd: 1000000,
+      maxActiveDeals: 100,
       aiAuditsPerMonth: maxAiAudits,
       escrowFeeRate,
-      transactionHistoryMonths: isSubActive && planConfig ? planConfig.transactionHistoryMonths : levelLimits.transactionHistoryMonths,
-      apiCallsPerMonth: isSubActive && planConfig ? planConfig.apiCallsPerMonth : levelLimits.apiCallsPerMonth,
+      transactionHistoryMonths: 36,
+      apiCallsPerMonth: 10000,
     },
     capabilities: {
-      canCreateEscrow: effectiveLevel >= 2 && activeDealsCount < (isSubActive && planConfig ? planConfig.maxActiveDeals : levelLimits.maxActiveDeals),
-      canUseSilverServices: isSubActive,
-      canUseGoldServices: isSubActive && subscriptionTier >= 3,
-      canUseDiamondServices: isSubActive && subscriptionTier >= 4,
+      canCreateEscrow: true,
+      canUseSilverServices: true,
+      canUseGoldServices: true,
+      canUseDiamondServices: true,
       canUseMultiCurrency,
       canUseWhiteLabel,
       canGenerateUnlimitedContracts,
-      canRunAiAudit: isSubActive && (maxAiAudits === Number.MAX_SAFE_INTEGER || aiAuditsRemaining > 0),
+      canRunAiAudit: true,
     },
   };
 }

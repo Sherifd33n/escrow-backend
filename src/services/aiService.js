@@ -308,13 +308,14 @@ export function normalizeMilestoneCheckpoints(milestones) {
 export async function generateAiScope(userId, { categoryLabel, description }) {
   const entitlements = await getUserEntitlements(userId);
 
-  // Scope generator entitlement check
+  // Scope generator entitlement check (subscription check commented out)
+  /*
   if (
     entitlements.effectiveLevel < 2 &&
     entitlements.subscription.status !== "active"
   ) {
     const error = new Error(
-      "KYC Level 2 verification or active subscription required to use AI Scope Generator.",
+      "KYC Level 2 verification required to use AI Scope Generator.",
     );
 
     error.statusCode = 403;
@@ -322,6 +323,7 @@ export async function generateAiScope(userId, { categoryLabel, description }) {
 
     throw error;
   }
+  */
 
   if (!process.env.GROQ_API_KEY) {
     const error = new Error("Groq API key is not configured on the server.");

@@ -1,0 +1,415 @@
+{
+  "info": {
+    "_postman_id": "lumbrr-v1-b2b-escrow-api-collection",
+    "name": "Lumbrr V1 B2B Escrow API",
+    "description": "Complete external API collection for Lumbrr B2B Escrow platform.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:4000/api/v1/escrows",
+      "type": "string"
+    },
+    {
+      "key": "apiKey",
+      "value": "lmb_test_YOUR_API_KEY_HERE",
+      "type": "string"
+    },
+    {
+      "key": "transactionId",
+      "value": "1",
+      "type": "string"
+    },
+    {
+      "key": "milestoneId",
+      "value": "1",
+      "type": "string"
+    }
+  ],
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{apiKey}}",
+        "type": "string"
+      }
+    ]
+  },
+  "item": [
+    {
+      "name": "1. Wallet & Banking",
+      "item": [
+        {
+          "name": "Get Partner Wallet Balance",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/wallet"
+          }
+        },
+        {
+          "name": "Add Bank Account",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/wallet/bank-accounts",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"accountNumber\": \"0123456789\",\n  \"bankCode\": \"058\",\n  \"accountName\": \"Acme Tech Solutions Ltd\"\n}"
+            }
+          }
+        },
+        {
+          "name": "List Bank Accounts",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/wallet/bank-accounts"
+          }
+        },
+        {
+          "name": "Request Withdrawal / Payout",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/wallet/withdrawals",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"amount\": 500,\n  \"bankAccountId\": 1\n}"
+            }
+          }
+        },
+        {
+          "name": "List Withdrawals History",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/wallet/withdrawals"
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. AI Scoping & Auditing",
+      "item": [
+        {
+          "name": "Generate AI Contract Scope",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/ai/scope",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"categoryLabel\": \"Full-Stack Web App\",\n  \"description\": \"Build an Airbnb clone with Next.js and escrow booking system.\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Run AI Deliverable Audit",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/{{transactionId}}/ai/audit",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"milestoneId\": {{milestoneId}},\n  \"title\": \"Backend Architecture\",\n  \"amount\": 400\n}"
+            }
+          }
+        },
+        {
+          "name": "Get AI Audits for Deal",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/{{transactionId}}/ai/audits"
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. Escrow Deals Lifecycle",
+      "item": [
+        {
+          "name": "Create Escrow Deal",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"Fullstack Marketplace Platform\",\n  \"amount\": 1000,\n  \"currency\": \"USD\",\n  \"buyerEmail\": \"buyer@partner.com\",\n  \"buyerName\": \"Acme Client\",\n  \"sellerEmail\": \"vendor@agency.io\",\n  \"sellerName\": \"Elite Dev Studio\",\n  \"inspectionPeriodDays\": 5,\n  \"partnerPlatformFee\": 15,\n  \"milestones\": [\n    { \"title\": \"Milestone 1: Backend Architecture\", \"amount\": 400 },\n    { \"title\": \"Milestone 2: Frontend Client\", \"amount\": 600 }\n  ],\n  \"scope\": {\n    \"deliverables\": [\"REST API\", \"React Frontend\"],\n    \"requirements\": \"Production grade code\"\n  }\n}"
+            }
+          }
+        },
+        {
+          "name": "Get Escrow Details",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/{{transactionId}}"
+          }
+        },
+        {
+          "name": "List Escrows (Filtered)",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}?page=1&limit=10&status=pending"
+          }
+        },
+        {
+          "name": "Update Escrow Status",
+          "request": {
+            "method": "PATCH",
+            "url": "{{baseUrl}}/{{transactionId}}/status",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"inprogress\",\n  \"note\": \"Work started by vendor\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Release Escrow Funds",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/{{transactionId}}/release",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reason\": \"Work accepted by client\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Cancel Escrow Deal",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/{{transactionId}}/cancel",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reason\": \"Project cancelled by mutual agreement\"\n}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. Milestones Operations",
+      "item": [
+        {
+          "name": "Add Milestone",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/{{transactionId}}/milestones",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"Milestone 3: QA & Documentation\",\n  \"amount\": 200\n}"
+            }
+          }
+        },
+        {
+          "name": "Edit Milestone",
+          "request": {
+            "method": "PATCH",
+            "url": "{{baseUrl}}/{{transactionId}}/milestones/{{milestoneId}}",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"Milestone 3: QA, Security & Documentation\",\n  \"amount\": 250\n}"
+            }
+          }
+        },
+        {
+          "name": "Delete Milestone",
+          "request": {
+            "method": "DELETE",
+            "url": "{{baseUrl}}/{{transactionId}}/milestones/{{milestoneId}}"
+          }
+        },
+        {
+          "name": "Fund Milestone",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/{{transactionId}}/milestones/{{milestoneId}}/fund"
+          }
+        },
+        {
+          "name": "Submit Deliverable",
+          "request": {
+            "method": "PATCH",
+            "url": "{{baseUrl}}/{{transactionId}}/milestones/{{milestoneId}}/status",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"submitted\",\n  \"deliverableNote\": \"Code deployed to staging environment\",\n  \"deliverableUrl\": \"https://staging.app.com\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Approve Milestone",
+          "request": {
+            "method": "PATCH",
+            "url": "{{baseUrl}}/{{transactionId}}/milestones/{{milestoneId}}/status",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"approved\",\n  \"feedback\": \"Deliverable approved\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Reject Milestone / Request Revision",
+          "request": {
+            "method": "PATCH",
+            "url": "{{baseUrl}}/{{transactionId}}/milestones/{{milestoneId}}/status",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"rejected\",\n  \"feedback\": \"Please fix responsive styling on mobile.\"\n}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "5. Scope & Amendments",
+      "item": [
+        {
+          "name": "Get Scope Terms",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/{{transactionId}}/scope"
+          }
+        },
+        {
+          "name": "Update Scope",
+          "request": {
+            "method": "PATCH",
+            "url": "{{baseUrl}}/{{transactionId}}/scope",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"deliverables\": [\"REST API\", \"React Web Client\", \"Admin Portal\"],\n  \"revisionPolicy\": \"3 revisions included\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Request Scope Changes",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/{{transactionId}}/scope/request-changes",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"proposedChanges\": { \"addFeature\": \"Payment Webhook Worker\" },\n  \"reason\": \"Needed for live sync\"\n}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "6. Payments & Checkout",
+      "item": [
+        {
+          "name": "Generate Paystack Hosted Payment Link",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/{{transactionId}}/payment-link"
+          }
+        },
+        {
+          "name": "Verify Payment Reference",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/payments/verify/API-ESC-42-SAMPLE-REF"
+          }
+        }
+      ]
+    },
+    {
+      "name": "7. Disputes & Arbitration",
+      "item": [
+        {
+          "name": "Open Dispute",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/{{transactionId}}/dispute",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reason\": \"Deliverables incomplete and vendor missed deadline.\",\n  \"raisedByRole\": \"buyer\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Get Dispute Details",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/{{transactionId}}/dispute"
+          }
+        },
+        {
+          "name": "Arbitrate & Resolve Dispute",
+          "request": {
+            "method": "PATCH",
+            "url": "{{baseUrl}}/{{transactionId}}/dispute/resolve",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"winner\": \"buyer\",\n  \"resolution\": \"Full refund awarded to buyer due to breach of SLA.\"\n}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "8. Reviews & Audit Trail",
+      "item": [
+        {
+          "name": "Submit Review",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/{{transactionId}}/reviews",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"rating\": 5,\n  \"comment\": \"Exceptional delivery and communication!\",\n  \"reviewerRole\": \"buyer\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Get Reviews",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/{{transactionId}}/reviews"
+          }
+        },
+        {
+          "name": "Get Transaction Audit History",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/{{transactionId}}/history"
+          }
+        }
+      ]
+    },
+    {
+      "name": "9. Webhook Monitoring",
+      "item": [
+        {
+          "name": "List Webhook Deliveries",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/webhooks/deliveries?limit=25"
+          }
+        },
+        {
+          "name": "Retry Failed Webhook Delivery",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/webhooks/retry/1"
+          }
+        }
+      ]
+    }
+  ]
+}

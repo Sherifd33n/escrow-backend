@@ -114,9 +114,11 @@ router.get("/entitlements", async (req, res, next) => {
   }
 });
 
+// --------------------------------------------------------------------------
+// [SUBSCRIPTION SYSTEM COMMENTED OUT - PURE ESCROW FEE COMMISSION MODEL]
+// --------------------------------------------------------------------------
+/*
 // POST /initiate-payment - Initialise a Paystack payment for a subscription plan.
-// Server calculates amount from PLAN_CONFIGS — client cannot supply a price.
-// Returns an authorization_url for the frontend to redirect the user to Paystack.
 router.post("/initiate-payment", async (req, res, next) => {
   try {
     const { planId, billingCycle } = req.body;
@@ -149,8 +151,6 @@ router.post("/initiate-payment", async (req, res, next) => {
 });
 
 // POST /verify-payment/:reference - Verify a subscription payment and activate the plan.
-// Calls Paystack server-to-server. Only activates subscription on confirmed success.
-// Idempotent: replaying the same verified reference returns success without re-activating.
 router.post("/verify-payment/:reference", async (req, res, next) => {
   try {
     const { reference } = req.params;
@@ -209,6 +209,15 @@ router.post("/cancel-pending-downgrade", async (req, res, next) => {
   } catch (error) {
     next(error);
   }
+});
+*/
+
+// Fallback handlers returning disabled status
+router.post(["/initiate-payment", "/verify-payment/:reference", "/cancel", "/cancel-pending-downgrade"], (req, res) => {
+  res.status(400).json({
+    error: "Subscriptions are currently disabled. The platform operates on pure escrow fee commissions.",
+    plansDisabled: true,
+  });
 });
 
 export default router;

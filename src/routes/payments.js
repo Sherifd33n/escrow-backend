@@ -63,21 +63,23 @@ router.post("/webhook/paystack", async (req, res) => {
       case "charge.success": {
         const paymentPurpose = eventData.metadata?.purpose;
 
+        /*
+        // [SUBSCRIPTION SYSTEM COMMENTED OUT - PURE ESCROW FEE COMMISSION MODEL]
         if (paymentPurpose === "subscription") {
           // Subscription payment — verify and activate the plan
-          // userId=null: ownership is established from the payments record itself
           await verifyAndActivateSubscriptionPayment(providerRef, null);
         } else {
-          // Wallet-funding payment (default)
-          const result = await paymentService.processSuccessfulPayment({
-            reference: providerRef,
-            providerData: eventData,
-            passedConn: conn,
-          });
-          if (result && typeof result.sendNotification === "function") {
-            postCommitCallback = result.sendNotification;
-          }
+        */
+        // Wallet-funding payment (default)
+        const result = await paymentService.processSuccessfulPayment({
+          reference: providerRef,
+          providerData: eventData,
+          passedConn: conn,
+        });
+        if (result && typeof result.sendNotification === "function") {
+          postCommitCallback = result.sendNotification;
         }
+        /* } */
         break;
       }
 
